@@ -37,18 +37,29 @@ flowchart TB
 
 ### 2.1 Extraction
 
-| Format | Library | Notes |
-|---|---|---|
-| PDF (text layer) | `pypdf` first, `pdfplumber` for layout/tables | Record per-page text so `page_start`/`page_end` citations are exact |
-| PDF (no text layer) | Not supported in MVP — mark `failed` with reason `no_text_layer` | OCR is deferred (ADR-007); failing loudly beats silently returning an empty document |
-| DOCX | `python-docx` | Preserve heading levels to build `heading_path` |
-| TXT / MD | native | Markdown parsed for heading structure |
-| HTML | `selectolax` / `trafilatura` | Strip nav/boilerplate if it is ever added |
-| Pasted note | direct | Body becomes `raw_text` |
+One extractor per format, chosen by the design spec rather than by taste. Dispatch checks the **filename extension first, then the MIME type**: browsers send `text/plain` for anything they do not recognise, so the extension is the more reliable hint and the two are matched in `extractor_for()`.
+
+| Format | Extractor | Library | Why this one |
+|---|---|---|---|
+| PDF (text layer) | `extract_pdf` | **PyMuPDF** (`pymupdf`) | Per-page text via `page.get_text("text")`, and the page map is exact, so `page_number` citations point at the right page. PyMuPDF's text layer is markedly cleaner than `pypdf`'s on real-world PDFs. |
+| PDF (no text layer) | — | — | `failed` with `no_text_layer`, detected by `looks_like_scan()`. OCR is deferred (ADR-007); failing loudly beats silently returning an empty document. |
+| DOCX | `extract_docx` | `python-docx` | Heading levels survive, which is what builds `heading_path`. |
+| Markdown | `extract_markdown` | `markdown-it-py` (commonmark + table) | Rendered to HTML, then flattened back to text that **keeps `#` heading markers** — the chunker needs them to build `heading_path`. |
+| HTML | `extract_html` | **BeautifulSoup** | Emits `#` markers from `h1`–`h6` and strips `nav`/`header`/`footer`/`script`/`style`/`aside`/`form`, so navigation text never becomes citable "content". |
+| TXT | `extract_text` | Python file handling | Decoded `utf-8-sig` → `utf-8` → `latin-1`, so a stray BOM or a Windows export does not fail the upload. |
+| Pasted note | direct | — | Body becomes `raw_text`. |
+
+`.doc` (`application/msword`) is **not** accepted: `python-docx` reads the OOXML format only, and silently returning garbage for a legacy binary would be worse than a clear rejection. The allow-list in `core/config.py` and the storage bucket's `allowed_mime_types` must be edited together — widening one alone makes signed uploads fail with an unrelated-looking error.
 
 Extraction writes a **normalized text document** plus a lightweight structure map (page boundaries, heading offsets). Everything downstream works off that map, so chunking never has to re-parse the original.
 
-Normalization: unify whitespace, convert smart quotes to ASCII, preserve line breaks *inside* paragraphs only as paragraph breaks. Do **not** lowercase (it damages embeddings and quotes).
+### 2.1a Clean and normalize (a real stage, not a side effect)
+
+The spec lists "clean and normalize" as its own step between extraction and chunking, and the worker models it that way: `processing_stage = 'normalizing'`, with the cleaned text written back before anything is split.
+
+Normalization: collapse intra-line whitespace, unify smart quotes to ASCII, keep paragraph breaks, and drop PDF running headers/page-number lines that would otherwise become citable content. Do **not** lowercase — it damages embeddings and corrupts quoted citations.
+
+Making this observable matters: the stage shows up in progress reporting, and `tests/db/test_ingest_pipeline.py` asserts the stored chunk text is already clean, which is the only form of the claim that can regress silently.
 
 ### 2.2 Chunking
 
@@ -56,11 +67,13 @@ Default strategy: **structure-aware recursive splitting**.
 
 | Parameter | Value | Rationale |
 |---|---|---|
-| Target size | ~500 tokens | Fits 3–5 chunks in a prompt with room for reasoning |
-| Max size | 800 tokens | Hard ceiling |
-| Overlap | 80 tokens from the tail of the previous chunk | Preserves sentences spanning boundaries |
+| Target size | ~700 tokens | The spec's starting value. Fits several chunks in a prompt with room for reasoning. |
+| Max size | 900 tokens | Hard ceiling |
+| Overlap | 100 tokens from the tail of the previous chunk | Preserves sentences spanning boundaries |
 | Boundaries | Heading → paragraph → sentence → word | Never cut mid-sentence if a smaller unit exists |
-| Min size | 120 tokens | Merge tiny trailing fragments **into the previous chunk** in their own section |
+| Min size | 150 tokens | Merge tiny trailing fragments **into the previous chunk** in their own section |
+
+These are **starting values, and the spec says so explicitly** — "test them against your actual documents and retrieval quality". The constants live at the top of `ai/chunking.py` with that note attached, and `tests/unit/test_chunking.py::TestPinnedStrategy` fails if they drift, so changing them is a deliberate edit with an eval run behind it rather than a quiet tweak.
 | Prefix | `heading_path` prepended to `content` before embedding only | Gives the embedding section context; the citation quotes the chunk without the prefix |
 
 Edge cases:
@@ -68,7 +81,7 @@ Edge cases:
 - **Tables** stay whole where they fit under max size; oversized tables split by row group with the header row repeated in each part.
 - **Code blocks** are never split mid-block; an oversized block is split at blank lines.
 - **Frontmatter / title** from a note is not chunked separately; it feeds `documents.title` and the summary.
-- Chunks shorter than 120 tokens that are NOT a document's only chunk attach to the adjacent chunk rather than existing as a weak standalone hit.
+- Chunks shorter than 150 tokens that are NOT a document's only chunk attach to the adjacent chunk rather than existing as a weak standalone hit.
 
 Determinism: same text + same parameters ⇒ same chunk set. This makes idempotent re-processing testable (invariant 5).
 
@@ -79,7 +92,33 @@ Determinism: same text + same parameters ⇒ same chunk set. This makes idempote
 - Stored per chunk: `embedding`, `embedding_model`. A query embedded with a different model than the stored chunks is **rejected** at retrieval time rather than producing garbage distances.
 - `embedding_model` on `documents` records what produced the doc's vectors, so an index migration can target `WHERE embedding_model <> $current`.
 
-### 2.4 Summary and entities (Connect layer)
+### 2.4 Stage order is a requirement, not an implementation detail
+
+The spec fixes the order of the ingestion pipeline, and the worker implements it literally, renumbering the steps to match:
+
+| # | Step | `processing_stage` | Where |
+|---|---|---|---|
+| 1 | Upload to Supabase Storage | — | `POST /documents/upload-url`, signed upload from the browser |
+| 2 | Create document record | — | same endpoint |
+| 3 | Create processing job | — | same transaction |
+| 4 | Background worker claims the job | — | `workers/main.py` (claim, retry, stale sweep) |
+| 5 | Extract text | `extracting` | `ai/extract.py` |
+| 6 | Clean and normalize | `normalizing` | `ai/chunking.normalize_text` |
+| 7 | Split into chunks | `chunking` | `ai/chunking.py` |
+| 8 | Generate embeddings | `embedding` | `ai/providers.py` |
+| 9 | Store chunks and vectors | `embedding` | version-guarded, one transaction |
+| 10 | Generate document summary | queued `summary` job | `enqueue`, priority 150 |
+| 11 | Extract concepts and relationships | queued `entities` job | `enqueue`, priority 200 |
+| 12 | **Mark document completed** | back to `null` | `status='ready'`, `completed_at=now()` |
+
+Two consequences are load-bearing and both are tested:
+
+- **Chunks are written before the status flips**, in the same transaction, so `ready` can never describe a source with no chunks. Steps 10–11 are enqueued in that same run, which is how "summary and concepts before completed" is honoured without holding the transaction open on two LLM calls.
+- **Retrieval gates on `status = 'ready'`** inside `hybrid_search`. Without that gate a half-indexed document is citable, and step 12 becomes decorative. `tests/db/test_ingest_pipeline.py` asserts a document goes from findable → not findable (`processing`/`pending`/`failed`) → findable again, so the gate cannot regress into a no-op.
+
+Progress reporting maps the stages to the percentages the UI polls: `null → 0`, `extracting → 20`, `normalizing → 30`, `chunking → 45`, `embedding → 70`, `entities → 90`.
+
+### 2.5 Summary and entities (Connect layer)
 
 After chunks exist, a follow-up job:
 1. Summarizes the document (2–3 sentences, cites its own chunks internally for traceability).
@@ -87,6 +126,8 @@ After chunks exist, a follow-up job:
 3. Upserts `entities` by `normalized_name`, links `chunk_entities` with confidence, increments `mention_count`, and updates `entity_edges` co-occurrence weights.
 
 Entity extraction is best-effort: a failure degrades the graph, never the document's `ready` status. It runs as a separate job precisely so it cannot block retrieval from working.
+
+The worker inserts those follow-up jobs **directly** rather than calling `public.enqueue_job()`. That helper is the *user* path: it authorises with `can_write_workspace()`, which needs `auth.uid()`. The worker carries no end-user JWT, and it owns the queue (`processing_jobs` is service-writable and user-read-only), so a direct insert is the honest expression of that ownership. Trying to make `enqueue_job()` accept the service role is a trap — it is `SECURITY DEFINER`, so `current_user` inside it is the function owner, and any role check there would be either meaningless or an escalation path.
 
 ---
 

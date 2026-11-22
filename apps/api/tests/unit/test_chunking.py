@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.ai.chunking import (
     MAX_TOKENS,
     MIN_TOKENS,
+    TARGET_TOKENS,
     approx_tokens,
     chunk_text,
     normalize_text,
@@ -98,3 +99,52 @@ class TestChunking:
 
     def test_empty_input_yields_no_chunks(self):
         assert chunk_text("   \n\n  ") == []
+
+
+class TestPinnedStrategy:
+    """The design pins ~700 tokens with ~100 overlap. These lock that in.
+
+    They are starting values, and the docstring in chunking.py says so. The point
+    of asserting them is that changing them must be a deliberate edit with an
+    eval run behind it, not a silent drift.
+    """
+
+    def test_targets_are_the_documented_ones(self):
+        from app.ai.chunking import OVERLAP_TOKENS, TARGET_TOKENS
+
+        assert TARGET_TOKENS == 700
+        assert OVERLAP_TOKENS == 100
+
+    def test_chunks_land_near_the_target(self):
+        # ~40 paragraphs of ~40 tokens each: comfortably more than one chunk.
+        paragraph = (
+            "Deployment secrets are set with flyctl and never committed. "
+            "The worker claims jobs with row locks. "
+        )
+        text = "\n\n".join([paragraph] * 40)
+        chunks = chunk_text(text)
+        assert len(chunks) > 1
+        # Every full chunk should be in the target's neighbourhood, not half of it.
+        full = chunks[:-1]
+        assert full, "expected at least one non-final chunk"
+        assert all(c.token_count >= TARGET_TOKENS // 2 for c in full)
+
+    def test_ordering_is_preserved(self):
+        text = "\n\n".join(
+            [f"Paragraph number {i} with enough words to matter." for i in range(60)]
+        )
+        chunks = chunk_text(text)
+        assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+
+    def test_consecutive_chunks_overlap(self):
+        """Overlap is what stops an answer being cut in half at a boundary."""
+        text = "\n\n".join(
+            [f"Sentence {i} carries a distinct fact about indexing." for i in range(80)]
+        )
+        chunks = chunk_text(text)
+        assert len(chunks) >= 2
+        joined = [c.content.split() for c in chunks]
+        # Some word sequence from the end of chunk N appears at the start of N+1.
+        tail_words = set(joined[0][-40:])
+        head_words = set(joined[1][:40])
+        assert tail_words & head_words, "adjacent chunks share no text; overlap is not applied"

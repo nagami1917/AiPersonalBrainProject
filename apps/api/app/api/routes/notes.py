@@ -16,7 +16,14 @@ from app.schemas.documents import NoteCreate, NoteDetail, NoteSummary, NoteUpdat
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/notes", tags=["notes"])
 
-_STAGE_PROGRESS = {None: 0, "extracting": 25, "chunking": 45, "embedding": 75, "entities": 95}
+_STAGE_PROGRESS = {
+    None: 0,
+    "extracting": 20,
+    "normalizing": 30,
+    "chunking": 45,
+    "embedding": 70,
+    "entities": 90,
+}
 
 
 def _summary(record: asyncpg.Record, tags: list[str] | None = None) -> NoteSummary:

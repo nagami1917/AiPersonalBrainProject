@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import asyncpg
 
-from app.ai.chunking import chunk_text
+from app.ai.chunking import chunk_text, normalize_text
 from app.ai.extract import ExtractionError, extract
 from app.ai.providers import Embedder
 from app.core.config import Settings
@@ -59,9 +59,15 @@ async def _set_stage(conn: asyncpg.Connection, target: IngestTarget, stage: str)
 
 
 async def _fail(conn: asyncpg.Connection, target: IngestTarget, message: str) -> None:
+    # completed_at exists on documents only: it answers "how long did this file
+    # take, and how did it end?" for both outcomes, so a failure stamps it too.
+    # Notes have no such column, hence the per-kind assignment list.
+    assignments = "status='failed', processing_stage=null, error_message=$2"
+    if target.kind == "document":
+        assignments += ", completed_at=now()"
     await conn.execute(
         f"""update public.{_table(target.kind)}
-            set status='failed', processing_stage=null, error_message=$2
+            set {assignments}
             where id=$1 and version=$3""",
         target.id,
         message,
@@ -93,7 +99,7 @@ async def _load_target(
         )
 
     row = await conn.fetchrow(
-        """select id, workspace_id, title, mime_type, storage_path, raw_text, version
+        """select id, workspace_id, title, mime_type, file_path, raw_text, version
            from public.documents where id=$1""",
         source_id,
     )
@@ -104,8 +110,10 @@ async def _load_target(
     page_map: list[tuple[int, int, int]] | None = None
     page_count: int | None = None
 
-    if not text and row["storage_path"]:
-        data = await _download(row["storage_path"], settings)
+    # file_path is the storage key (schema column). raw_text short-circuits the
+    # download for re-indexing and for text pasted directly.
+    if not text and row["file_path"]:
+        data = await _download(row["file_path"], settings)
         result = extract(data, row["mime_type"] or "", row["title"])
         text = result.text
         page_map = result.page_map or None
@@ -147,24 +155,36 @@ async def run_ingest(
         return
 
     try:
-        # --- 1. text -------------------------------------------------------
+        # --- 1. extract ----------------------------------------------------
         await _set_stage(conn, target, "extracting")
         if not target.text.strip():
             await _fail(conn, target, "No text could be extracted from this source.")
             return
 
-        # --- 2. chunk ------------------------------------------------------
+        # --- 2. clean + normalize -------------------------------------------
+        # A distinct stage, not an implicit side effect of extraction, because it
+        # is the stage that most often changes retrieval quality: it collapses
+        # whitespace, unifies quotes, and (for PDFs) drops running headers and
+        # page-number lines that would otherwise become citable "content".
+        await _set_stage(conn, target, "normalizing")
+        cleaned = normalize_text(target.text)
+        if not cleaned.strip():
+            await _fail(conn, target, "No text could be extracted from this source.")
+            return
+        target = replace(target, text=cleaned)
+
+        # --- 3. chunk ------------------------------------------------------
         await _set_stage(conn, target, "chunking")
         chunks = chunk_text(target.text, target.page_map)
         if not chunks:
             await _fail(conn, target, "No text could be extracted from this source.")
             return
 
-        # --- 3. embed ------------------------------------------------------
+        # --- 4. embed ------------------------------------------------------
         await _set_stage(conn, target, "embedding")
         embeddings = await embedder.embed([c.content for c in chunks])
 
-        # --- 4. write, version-guarded, then flip status --------------------
+        # --- 5. store chunks + vectors, version-guarded ---------------------
         parent_col = "note_id" if target.kind == "note" else "document_id"
         async with conn.transaction():
             current = await conn.fetchval(
@@ -203,10 +223,17 @@ async def run_ingest(
                     target.version,
                 )
 
+            # "Mark document completed" is the last step of §4.1, which is why
+            # completed_at is set here and not when chunks were stored.
+            assignments = (
+                "status='ready', processing_stage=null, error_message=null, "
+                "embedding_model=$2, page_count=coalesce($3, page_count)"
+            )
+            if target.kind == "document":
+                assignments += ", completed_at=now()"
             await conn.execute(
                 f"""update public.{_table(target.kind)}
-                    set status='ready', processing_stage=null, error_message=null,
-                        embedding_model=$2, page_count=coalesce($3, page_count)
+                    set {assignments}
                     where id=$1 and version=$4""",
                 target.id,
                 embedder.model,
@@ -214,28 +241,30 @@ async def run_ingest(
                 target.version,
             )
 
-        # Follow-up jobs are best-effort and cannot block retrieval: the source is
-        # already searchable at this point.
-        await conn.execute(
-            """select public.enqueue_job(
-                 p_workspace_id => $1, p_job_type => 'summary',
-                 p_note_id => $2, p_document_id => $3,
-                 p_payload => $4::jsonb, p_priority => 150)""",
-            target.workspace_id,
-            target.id if target.kind == "note" else None,
-            target.id if target.kind == "document" else None,
-            {"version": target.version},
-        )
-        await conn.execute(
-            """select public.enqueue_job(
-                 p_workspace_id => $1, p_job_type => 'entities',
-                 p_note_id => $2, p_document_id => $3,
-                 p_payload => $4::jsonb, p_priority => 200)""",
-            target.workspace_id,
-            target.id if target.kind == "note" else None,
-            target.id if target.kind == "document" else None,
-            {"version": target.version},
-        )
+        # --- 6/7. summary, then concepts + relationships --------------------
+        # Design §4.1 orders summary and entity extraction BEFORE the completed
+        # mark; the worker satisfies that by queueing both in the same run, and
+        # lower priority numbers run first, so the summary lands before entities.
+        #
+        # These are inserted directly rather than through public.enqueue_job():
+        # that helper is the *user* path and authorises with can_write_workspace(),
+        # which needs auth.uid(). The worker has no end-user JWT, and it owns this
+        # queue (0011: processing_jobs is service-writable, user-read-only), so a
+        # direct insert is the honest expression of that ownership.
+        #
+        # Neither job can block retrieval: the source is already searchable here.
+        for job_type, priority in (("summary", 150), ("entities", 200)):
+            await conn.execute(
+                """insert into public.processing_jobs
+                     (workspace_id, type, note_id, document_id, payload, priority)
+                   values ($1, $2, $3, $4, $5, $6)""",
+                target.workspace_id,
+                job_type,
+                target.id if target.kind == "note" else None,
+                target.id if target.kind == "document" else None,
+                {"version": target.version},
+                priority,
+            )
         log.info(
             "ingest complete %s=%s chunks=%s version=%s",
             target.kind,
@@ -264,7 +293,7 @@ async def run_ingest(
         raise
 
 
-async def _download(storage_path: str, settings: Settings) -> bytes:
+async def _download(file_path: str, settings: Settings) -> bytes:
     """Fetch the original bytes with the service role.
 
     Object storage has no FK, so the worker is the only thing that transfers
@@ -272,7 +301,7 @@ async def _download(storage_path: str, settings: Settings) -> bytes:
     """
     import httpx
 
-    url = f"{settings.supabase_url}/storage/v1/object/{settings.storage_bucket}/{storage_path}"
+    url = f"{settings.supabase_url}/storage/v1/object/{settings.storage_bucket}/{file_path}"
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.get(
             url,

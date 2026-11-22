@@ -38,7 +38,7 @@ This milestone is deliberately before any UI. The tenant boundary is the one thi
 - Signed upload URL + confirm endpoints
 - Worker: claim → download → extract → normalize → chunk → embed → write chunks → flip status, in the documented order
 - Retry/backoff, staleness sweep, dead-letter visibility
-- DOCX / TXT / MD extractors; `no_text_layer` failure path
+- DOCX / TXT / MD / HTML extractors; PyMuPDF for PDF; `no_text_layer` failure path
 - Tests: chunker golden files (same input ⇒ same output), page-offset correctness, idempotent reprocess
 
 ---
@@ -62,7 +62,7 @@ If M3 slips, everything else waits. A beautiful app over an ungrounded model is 
 **Done when:** a person can sign up, drop in a PDF, and get a cited answer without touching a terminal.
 
 - SvelteKit shell: auth (Supabase), protected routes, session refresh
-- Documents page: upload with progress driven by real `processing_stage`, list, delete, retry
+- Documents page: upload with progress driven by real `processing_stage` (extracting → normalizing → chunking → embedding), list, delete, retry
 - Notes: create/edit with debounced autosave → reindex
 - Search page: results with `matched_arm`, snippet highlighting, jump-to-source
 - Chat page: streaming with sources-first UI, citation chips → source viewer with passage highlight

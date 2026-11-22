@@ -59,7 +59,7 @@ create table if not exists public.notes (
                   check (content_format in ('markdown', 'plain')),
   status        text not null default 'pending'
                   check (status in ('pending', 'processing', 'ready', 'failed', 'archived')),
-  processing_stage text check (processing_stage in ('extracting','chunking','embedding','entities')),
+  processing_stage text check (processing_stage in ('extracting','normalizing','chunking','embedding','entities')),
   error_message text,
   version       integer not null default 1 check (version >= 1),
   embedding_model text,
@@ -116,7 +116,7 @@ create table if not exists public.documents (
   page_count      integer check (page_count is null or page_count >= 0),
   status          text not null default 'pending'
                     check (status in ('pending','processing','ready','failed','archived')),
-  processing_stage text check (processing_stage in ('extracting','chunking','embedding','entities')),
+  processing_stage text check (processing_stage in ('extracting','normalizing','chunking','embedding','entities')),
   error_message   text,
   version         integer not null default 1 check (version >= 1),
   embedding_model text,

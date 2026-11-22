@@ -27,12 +27,15 @@ from app.services import storage_service
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/documents", tags=["documents"])
 
+# Progress is a function of the design's pipeline order (§4.1), so the bar moves
+# monotonically and never jumps backwards.
 _STAGE_PROGRESS = {
     None: 0,
-    "extracting": 25,
+    "extracting": 20,
+    "normalizing": 30,
     "chunking": 45,
-    "embedding": 75,
-    "entities": 95,
+    "embedding": 70,
+    "entities": 90,
 }
 
 

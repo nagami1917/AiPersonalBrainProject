@@ -123,7 +123,7 @@ This is mitigation, not immunity. It is tested with an adversarial eval set rath
 | Storage RLS | `(storage.foldername(name))[1] = auth.uid()::text` on select/insert/update/delete |
 | Byte proxying | None — the browser PUTs directly; the API never handles file bytes |
 
-Parsers (`pypdf`, `python-docx`) run on untrusted input in the worker, not in the request path, so a parser crash costs a retry rather than an outage.
+Parsers (PyMuPDF, `python-docx`, `markdown-it-py`, BeautifulSoup) run on untrusted input in the worker, not in the request path, so a parser crash costs a retry rather than an outage.
 
 ---
 
