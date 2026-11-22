@@ -61,6 +61,7 @@ class CitationOut(BaseModel):
     source_kind: Literal["note", "document"]
     source_id: str
     source_title: str
+    filename: str | None = None
     quote: str
     page: int | None = None
     heading_path: str | None = None
@@ -83,6 +84,11 @@ class ConversationOut(BaseModel):
     updated_at: datetime
 
 
+class FeedbackOut(BaseModel):
+    helpful: bool
+    reason: str | None = None
+
+
 class MessageOut(BaseModel):
     id: str
     role: str
@@ -90,6 +96,8 @@ class MessageOut(BaseModel):
     grounded: bool | None = None
     created_at: datetime
     citations: list[CitationOut] = Field(default_factory=list)
+    # null means unrated; a rated message is always an object
+    feedback: FeedbackOut | None = None
 
 
 class FeedbackRequest(BaseModel):

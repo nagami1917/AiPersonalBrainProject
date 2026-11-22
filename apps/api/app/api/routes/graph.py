@@ -4,7 +4,8 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from app.core.deps import UserConn, WorkspaceCtx
+from app.core import tenancy
+from app.core.deps import CurrentUser, UserConn, WorkspaceCtx
 from app.core.errors import NotFound
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/graph", tags=["graph"])
@@ -57,14 +58,14 @@ async def get_entity(entity_id: str, ctx: WorkspaceCtx, conn: UserConn) -> dict[
 
     links = await conn.fetch(
         """select l.id, l.relation, l.weight,
-                  case when l.source_entity_id = $1 then 'out' else 'in' end as direction,
+                  case when l.source_id = $1 then 'out' else 'in' end as direction,
                   e.id as other_id, e.name as other_name, e.entity_type as other_type
            from public.knowledge_links l
            join public.knowledge_entities e
-             on e.id = case when l.source_entity_id = $1
-                            then l.target_entity_id else l.source_entity_id end
+             on e.id = case when l.source_id = $1
+                            then l.target_id else l.source_id end
            where l.workspace_id = $2
-             and ($1 = l.source_entity_id or $1 = l.target_entity_id)
+             and ($1 = l.source_id or $1 = l.target_id)
            order by l.weight desc limit 100""",
         entity_id,
         ctx.id,
@@ -132,8 +133,8 @@ async def list_links(
                   s.id as source_id, s.name as source_name, s.entity_type as source_type,
                   t.id as target_id, t.name as target_name, t.entity_type as target_type
            from public.knowledge_links l
-           join public.knowledge_entities s on s.id = l.source_entity_id
-           join public.knowledge_entities t on t.id = l.target_entity_id
+           join public.knowledge_entities s on s.id = l.source_id
+           join public.knowledge_entities t on t.id = l.target_id
            where l.workspace_id=$1
            order by l.weight desc limit $2""",
         ctx.id,
@@ -157,3 +158,82 @@ async def list_links(
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Flat shape for clients that want "the graph" in one call.
+#
+# The scoped routes above answer narrower questions (search entities, page through
+# links). A graph view needs both at once, and making the client fan out to two
+# endpoints means two round trips that can disagree — a node rendered with no edges
+# because the second response had not arrived. This returns one consistent snapshot.
+# ---------------------------------------------------------------------------
+
+
+async def _graph_payload(conn: Any, workspace_id: str, limit: int) -> dict[str, Any]:
+    entities = await conn.fetch(
+        """select id, name, entity_type, description, mention_count
+           from public.knowledge_entities
+           where workspace_id=$1
+           order by mention_count desc, lower(name)
+           limit $2""",
+        workspace_id,
+        limit,
+    )
+    links = await conn.fetch(
+        """select l.id, l.relation, l.weight, l.source_id, l.target_id
+           from public.knowledge_links l
+           where l.workspace_id=$1
+           order by l.weight desc
+           limit $2""",
+        workspace_id,
+        limit * 4,
+    )
+    return {
+        "nodes": [
+            {
+                "id": str(r["id"]),
+                "name": r["name"],
+                "entity_type": r["entity_type"],
+                "description": r["description"],
+                "mention_count": r["mention_count"],
+            }
+            for r in entities
+        ],
+        "edges": [
+            {
+                "id": str(r["id"]),
+                "source_id": str(r["source_id"]),
+                "target_id": str(r["target_id"]),
+                "relation": r["relation"],
+                "weight": r["weight"],
+            }
+            for r in links
+        ],
+    }
+
+
+flat_router = APIRouter(prefix="/graph", tags=["graph"])
+
+
+@flat_router.get("", response_model=dict)
+async def flat_graph(
+    conn: UserConn,
+    user: CurrentUser,
+    workspace_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Graph data in one snapshot.
+
+    `workspace_id` defaults to the caller's own default workspace, so a single-user
+    client never has to know the id. When supplied it is authorised the same way as
+    the path form — membership, or 404.
+    """
+    ctx = (
+        await tenancy.resolve_workspace(conn, user_id=user.id, workspace_id=workspace_id)
+        if workspace_id
+        else await tenancy.default_workspace(conn, user_id=user.id)
+    )
+    payload = await _graph_payload(conn, ctx.id, limit)
+    payload["workspace_id"] = ctx.id
+    return payload

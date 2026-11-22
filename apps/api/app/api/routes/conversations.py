@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.deps import UserConn, WorkspaceCtx
 from app.core.errors import NotFound
@@ -18,7 +18,7 @@ class ConversationUpdate(BaseModel):
 
 class FeedbackIn(BaseModel):
     helpful: bool
-    reason: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @router.get("", response_model=list[dict[str, Any]])
@@ -89,15 +89,19 @@ async def set_feedback(
     Stored so the *retrieval* can be inspected later — a thumbs-down on a
     grounded answer usually means the right passage was not retrieved.
     """
-    value = "helpful" if payload.helpful else "unhelpful"
     record = await conn.fetchrow(
-        """update public.chat_messages set feedback=$3
+        """update public.chat_messages
+           set helpful=$3, feedback_reason=$4
            where id=$1 and workspace_id=$2 and role='assistant'
-           returning id, feedback""",
+           returning id, helpful, feedback_reason""",
         message_id,
         ctx.id,
-        value,
+        payload.helpful,
+        payload.reason,
     )
     if record is None:
         raise NotFound("Message not found")
-    return {"id": str(record["id"]), "feedback": record["feedback"]}
+    return {
+        "id": str(record["id"]),
+        "feedback": {"helpful": record["helpful"], "reason": record["feedback_reason"]},
+    }

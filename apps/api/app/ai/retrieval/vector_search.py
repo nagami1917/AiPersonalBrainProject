@@ -43,6 +43,9 @@ class Hit:
     vector_rank: int | None
     keyword_rank: int | None
     fused_score: float
+    # The uploaded file's name, for citations that name a file. Notes have none,
+    # so it falls back to the title.
+    source_filename: str | None = None
 
     @property
     def matched_arm(self) -> str:
@@ -69,6 +72,7 @@ def row_to_hit(row: Any) -> Hit:
         vector_rank=record.get("vector_rank"),
         keyword_rank=record.get("keyword_rank"),
         fused_score=float(record.get("fused_score") or 0.0),
+        source_filename=record.get("source_filename") or record.get("source_title"),
     )
 
 

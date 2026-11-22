@@ -77,6 +77,10 @@ create table if not exists public.message_sources (
   note_id      uuid references public.notes(id) on delete cascade,
   document_id  uuid references public.documents(id) on delete cascade,
   source_title text not null,
+  -- the uploaded file's name at citation time. Denormalised like source_title:
+  -- a renamed or deleted file must not rewrite history, and the spec's citation
+  -- shape names the file the user uploaded.
+  source_filename text,
   marker       integer not null check (marker >= 1),
   quote        text,
   page         integer check (page is null or page >= 1),

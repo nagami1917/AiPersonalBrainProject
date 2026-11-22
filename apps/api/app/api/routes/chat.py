@@ -29,6 +29,7 @@ def _citations(answer: GroundedAnswer) -> list[CitationOut]:
             source_kind=c.source_kind,  # type: ignore[arg-type]
             source_id=c.document_id,
             source_title=c.document_title,
+            filename=c.source_filename,
             quote=c.quote,
             page=c.page,
             heading_path=c.heading_path,
@@ -70,25 +71,29 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
-@router.post("/stream")
-async def stream(
+async def _stream_response(
+    *,
+    workspace_id: str,
+    user: Any,
     request: ChatRequest,
-    ctx: WorkspaceCtx,
-    user: CurrentUser,
-    embedder: Embedder = Depends(get_embedder),
-    llm: LLM = Depends(get_llm),
-    settings: Settings = Depends(get_settings),
+    embedder: Embedder,
+    llm: LLM,
+    settings: Settings,
 ) -> StreamingResponse:
-    """Server-sent events.
+    """Build the SSE response.
 
-    The transaction must stay open for the whole stream, so ownership of the
-    connection moves into the generator rather than the route's dependency.
+    Shared with `routes/ai.py` so there is ONE streaming implementation. Two copies
+    would drift on the thing that matters — where the transaction commits, and how
+    an error mid-stream is reported.
+
+    The transaction must stay open for the whole stream, so connection ownership
+    moves into the generator rather than the route's dependency.
     """
     from app.core.db import get_pool
     from app.core.security import user_connection
 
-    # The pool is fetched here rather than injected: the transaction must stay
-    # open for the whole stream, so connection ownership moves into the generator.
+    # Acquired before the response starts, so a database that is down is a clean
+    # 5xx instead of a stream that opens and immediately dies.
     pool = await get_pool(settings)
 
     async def event_stream() -> AsyncIterator[str]:
@@ -99,7 +104,7 @@ async def stream(
                 await user_connection(conn, user)
                 async for event, data in chat_service.stream_answer(
                     conn,
-                    workspace_id=ctx.id,
+                    workspace_id=workspace_id,
                     user_id=user.id,
                     request=request,
                     embedder=embedder,
@@ -121,6 +126,30 @@ async def stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/stream")
+async def stream(
+    request: ChatRequest,
+    ctx: WorkspaceCtx,
+    user: CurrentUser,
+    embedder: Embedder = Depends(get_embedder),
+    llm: LLM = Depends(get_llm),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """Server-sent events.
+
+    The transaction must stay open for the whole stream, so ownership of the
+    connection moves into the generator rather than the route's dependency.
+    """
+    return await _stream_response(
+        workspace_id=ctx.id,
+        user=user,
+        request=request,
+        embedder=embedder,
+        llm=llm,
+        settings=settings,
     )
 
 
@@ -160,13 +189,14 @@ async def get_conversation(
         raise NotFound("Conversation not found")
 
     messages = await conn.fetch(
-        """select id, role, content, grounded, model, latency_ms, feedback, created_at
+        """select id, role, content, grounded, model, latency_ms,
+                  helpful, feedback_reason, created_at
            from public.chat_messages
            where conversation_id=$1 order by created_at""",
         conversation_id,
     )
     sources = await conn.fetch(
-        """select message_id, marker, chunk_id, source_kind, source_title,
+        """select message_id, marker, chunk_id, source_kind, source_title, source_filename,
                   quote, page, heading_path, relevance_score
            from public.message_sources
            where workspace_id=$1
@@ -184,6 +214,7 @@ async def get_conversation(
                 "chunk_id": str(src["chunk_id"]),
                 "source_kind": src["source_kind"],
                 "source_title": src["source_title"],
+                "filename": src["source_filename"],
                 "quote": src["quote"],
                 "page": src["page"],
                 "heading_path": src["heading_path"],
@@ -204,7 +235,13 @@ async def get_conversation(
                 "grounded": m["grounded"],
                 "model": m["model"],
                 "latency_ms": m["latency_ms"],
-                "feedback": m["feedback"],
+                # Stored as two nullable columns; surfaced as one object so a
+                # client can tell "not rated" (null) from "rated unhelpful".
+                "feedback": (
+                    {"helpful": m["helpful"], "reason": m["feedback_reason"]}
+                    if m["helpful"] is not None
+                    else None
+                ),
                 "created_at": m["created_at"],
                 "citations": by_message.get(str(m["id"]), []),
             }

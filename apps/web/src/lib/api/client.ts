@@ -82,6 +82,7 @@ export type SourcePreview = {
   source_kind: 'note' | 'document';
   source_id: string;
   source_title: string;
+  filename: string | null;
   page: number | null;
   heading_path: string | null;
 };
@@ -92,6 +93,8 @@ export type Citation = {
   source_kind: 'note' | 'document';
   source_id: string;
   source_title: string;
+  /** Uploaded file name for document sources; the title for notes. */
+  filename: string | null;
   quote: string;
   page: number | null;
   heading_path: string | null;
