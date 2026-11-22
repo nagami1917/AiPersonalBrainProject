@@ -1,67 +1,68 @@
 <script lang="ts">
   /**
-   * Knowledge graph: a 1–2 hop slice, capped server-side.
+   * Knowledge graph page: composition and data only.
    *
-   * Rendered as a simple radial layout rather than a force simulation — the
-   * point is "what is connected to this", which reads better deterministically.
+   * A previous version of this page called `/v1/graph/entities/{id}/neighbors`,
+   * which did not exist on the server — it rendered "Could not load the graph"
+   * for every user and every workspace. The endpoint now exists, and this page
+   * calls it through `wsPath` so it is workspace-scoped like everything else
+   * (the flat `/v1/graph` path is for clients that resolve a workspace
+   * themselves).
    */
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { apiFetch, NexusApiError } from '$lib/api/client';
   import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
-  import type { Entity } from '$lib/api/types';
+  import type { Entity, EntityDetail, GraphSlice } from '$lib/api/types';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
-
-  type Node = { id: string; name: string; entity_type: string; mention_count: number };
-  type Edge = { source: string; target: string; relation: string; weight: number };
+  import KnowledgeGraph from '$lib/components/graph/KnowledgeGraph.svelte';
+  import GraphControls from '$lib/components/graph/GraphControls.svelte';
+  import NodeDetails from '$lib/components/graph/NodeDetails.svelte';
 
   let entities = $state<Entity[]>([]);
-  let nodes = $state<Node[]>([]);
-  let edges = $state<Edge[]>([]);
+  let slice = $state<GraphSlice | null>(null);
+  let detail = $state<EntityDetail | null>(null);
   let selected = $state<string | null>(null);
+  let query = $state('');
+  let depth = $state(1);
   let loading = $state(true);
+  let sliceLoading = $state(false);
   let error = $state<{ message: string; code?: string } | null>(null);
 
-  const size = 520;
-  const center = size / 2;
-
-  /** Deterministic radial positions: stable across renders, no jitter. */
-  const positioned = $derived.by(() => {
-    if (nodes.length === 0) return [] as Array<Node & { x: number; y: number; root: boolean }>;
-    const rootId = selected ?? nodes[0].id;
-    const ring = nodes.filter((n) => n.id !== rootId);
-    const radius = ring.length > 6 ? center - 60 : center - 110;
-    return [
-      { ...nodes.find((n) => n.id === rootId)!, x: center, y: center, root: true },
-      ...ring.map((node, index) => {
-        const angle = (index / Math.max(ring.length, 1)) * Math.PI * 2 - Math.PI / 2;
-        return {
-          ...node,
-          x: center + Math.cos(angle) * radius,
-          y: center + Math.sin(angle) * radius,
-          root: false
-        };
-      })
-    ];
-  });
-
-  const positions = $derived(new Map(positioned.map((n) => [n.id, n])));
-
-  async function load(entityId: string | null) {
+  async function loadSlice(id: string, nextDepth = depth) {
+    if (!$activeWorkspaceId) return;
+    sliceLoading = true;
+    selected = id;
+    error = null;
     try {
-      if (!$activeWorkspaceId) return;
-      const list = await apiFetch<Entity[]>(wsPath('/graph/entities?limit=40'));
+      // Two requests, deliberately parallel: the canvas needs the slice, the
+      // side panel needs the entity's own links and mentions.
+      const [nextSlice, nextDetail] = await Promise.all([
+        apiFetch<GraphSlice>(wsPath(`/graph/entities/${id}/neighbors?depth=${nextDepth}`)),
+        apiFetch<EntityDetail>(wsPath(`/graph/entities/${id}`))
+      ]);
+      slice = nextSlice;
+      detail = nextDetail;
+    } catch (err) {
+      error =
+        err instanceof NexusApiError
+          ? { message: err.message, code: err.code }
+          : { message: 'Could not load this part of the graph.' };
+    } finally {
+      sliceLoading = false;
+    }
+  }
+
+  async function loadInitial(entityId: string | null) {
+    if (!$activeWorkspaceId) return;
+    loading = true;
+    error = null;
+    try {
+      const list = await apiFetch<Entity[]>(wsPath('/graph/entities?limit=60'));
       entities = list;
       const seed = entityId ?? list[0]?.id ?? null;
-      selected = seed;
-      if (seed) {
-        const slice = await apiFetch<{ nodes: Node[]; edges: Edge[] }>(
-          `/v1/graph/entities/${seed}/neighbors?depth=1`
-        );
-        nodes = slice.nodes;
-        edges = slice.edges;
-      }
+      if (seed) await loadSlice(seed);
     } catch (err) {
       error =
         err instanceof NexusApiError
@@ -73,7 +74,7 @@
   }
 
   onMount(() => {
-    void load(page.url.searchParams.get('entity'));
+    void loadInitial(page.url.searchParams.get('entity'));
   });
 </script>
 
@@ -83,8 +84,8 @@
   <header>
     <h1 class="text-xl font-semibold tracking-tight text-ink-50">Graph</h1>
     <p class="mt-1 text-sm text-ink-400">
-      Entities extracted from your documents, and how they co-occur. Derived from passages — never a
-      second source of truth.
+      Entities extracted from your documents, and how they co-occur. Derived from passages — never
+      a second source of truth.
     </p>
   </header>
 
@@ -101,72 +102,31 @@
     />
   {:else}
     <div class="grid gap-6 lg:grid-cols-[240px_1fr]">
-      <aside class="space-y-1">
-        <h2 class="mb-2 text-xs font-medium uppercase tracking-wide text-ink-500">Entities</h2>
-        {#each entities as entity (entity.id)}
-          <button
-            class="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
-            class:bg-ink-800={selected === entity.id}
-            class:text-ink-100={selected === entity.id}
-            class:text-ink-300={selected !== entity.id}
-            onclick={() => load(entity.id)}
-          >
-            <span class="truncate">{entity.name}</span>
-            <span class="text-ink-500">{entity.mention_count}</span>
-          </button>
-        {/each}
-      </aside>
+      <GraphControls
+        {entities}
+        {selected}
+        bind:query
+        bind:depth
+        loading={sliceLoading}
+        onselect={(id) => loadSlice(id)}
+        ondepth={(level) => selected && loadSlice(selected, level)}
+      />
 
-      <div class="card overflow-hidden">
-        {#if nodes.length === 0}
-          <p class="px-4 py-16 text-center text-xs text-ink-500">
-            This entity has no recorded relations yet.
-          </p>
-        {:else}
-          <svg viewBox="0 0 {size} {size}" class="h-auto w-full" role="img" aria-label="Entity relationship graph">
-            {#each edges as edge}
-              {@const from = positions.get(edge.source)}
-              {@const to = positions.get(edge.target)}
-              {#if from && to}
-                <line
-                  x1={from.x}
-                  y1={from.y}
-                  x2={to.x}
-                  y2={to.y}
-                  stroke="currentColor"
-                  class="text-ink-700"
-                  stroke-width={Math.min(1 + edge.weight * 0.3, 3)}
-                />
-              {/if}
-            {/each}
+      <div class="space-y-4">
+        <div class="card overflow-hidden">
+          {#if sliceLoading && !slice}
+            <div class="skeleton h-96 w-full"></div>
+          {:else}
+            <KnowledgeGraph
+              nodes={slice?.nodes ?? []}
+              edges={slice?.edges ?? []}
+              seedId={slice?.seed_id ?? null}
+              onselect={(id) => loadSlice(id)}
+            />
+          {/if}
+        </div>
 
-            {#each positioned as node (node.id)}
-              <g
-                class="cursor-pointer"
-                onclick={() => load(node.id)}
-                role="button"
-                tabindex="0"
-                onkeydown={(e) => e.key === 'Enter' && load(node.id)}
-              >
-                <circle
-                  cx={node.x}
-                  cy={node.y}
-                  r={node.root ? 12 : 5 + Math.min(node.mention_count, 5)}
-                  class={node.root ? 'fill-accent-500' : 'fill-ink-500'}
-                />
-                <text
-                  x={node.x}
-                  y={node.y - (node.root ? 18 : 12)}
-                  text-anchor="middle"
-                  class={node.root ? 'fill-ink-100' : 'fill-ink-400'}
-                  font-size="11"
-                >
-                  {node.name.length > 22 ? node.name.slice(0, 21) + '…' : node.name}
-                </text>
-              </g>
-            {/each}
-          </svg>
-        {/if}
+        <NodeDetails entity={detail} loading={sliceLoading} onselect={(id) => loadSlice(id)} />
       </div>
     </div>
   {/if}

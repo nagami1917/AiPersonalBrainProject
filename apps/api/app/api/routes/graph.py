@@ -122,6 +122,101 @@ async def get_entity(entity_id: str, ctx: WorkspaceCtx, conn: UserConn) -> dict[
     }
 
 
+@router.get("/entities/{entity_id}/neighbors", response_model=dict)
+async def entity_neighbors(
+    entity_id: str,
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    depth: int = Query(default=1, ge=1, le=2),
+) -> dict[str, Any]:
+    """One entity's local neighbourhood, shaped for a graph view.
+
+    This is deliberately *not* `/graph` with a filter: the caller has already
+    chosen a node and wants only what is attached to it, with the subjects named
+    consistently. `nodes[0]` is always the seed, so a client can lay it out at
+    the centre without a second lookup.
+
+    `depth=2` adds the neighbours' neighbours, which is what makes a graph read
+    as a cluster rather than a starburst — but it is capped there, because hop
+    count is what turns a graph view into a hairball.
+    """
+    seed = await conn.fetchrow(
+        """select id, name, entity_type, description, mention_count
+           from public.knowledge_entities where id=$1 and workspace_id=$2""",
+        entity_id,
+        ctx.id,
+    )
+    if seed is None:
+        raise NotFound("Entity not found")
+
+    # Breadth-first by hop, done in SQL with a recursive CTE rather than looping
+    # in Python: hop 2 is one more join, not one more round trip.
+    rows = await conn.fetch(
+        """
+        with recursive hop as (
+          select $1::uuid as id, 0 as depth
+          union
+          select case when l.source_id = h.id then l.target_id else l.source_id end, h.depth + 1
+          from hop h
+          join public.knowledge_links l
+            on l.workspace_id = $2 and (l.source_id = h.id or l.target_id = h.id)
+          where h.depth < $3
+        ),
+        reached as (select distinct id from hop)
+        select e.id, e.name, e.entity_type, e.description, e.mention_count
+        from public.knowledge_entities e
+        join reached r on r.id = e.id
+        where e.workspace_id = $2
+        """,
+        entity_id,
+        ctx.id,
+        depth,
+    )
+
+    nodes = [
+        {
+            "id": str(r["id"]),
+            "name": r["name"],
+            "entity_type": r["entity_type"],
+            "description": r["description"],
+            "mention_count": r["mention_count"],
+        }
+        for r in rows
+    ]
+    # The seed must come first regardless of what the database returned.
+    nodes.sort(
+        key=lambda node: (node["id"] != str(seed["id"]), -node["mention_count"], node["name"])
+    )
+
+    node_ids = {node["id"] for node in nodes}
+    links = await conn.fetch(
+        """select l.id, l.relation, l.weight, l.source_id, l.target_id
+           from public.knowledge_links l
+           where l.workspace_id=$1
+             and l.source_id = any($2::uuid[]) and l.target_id = any($2::uuid[])
+           order by l.weight desc
+           limit 400""",
+        ctx.id,
+        list(node_ids),
+    )
+
+    return {
+        "nodes": nodes,
+        "edges": [
+            {
+                "id": str(r["id"]),
+                "source": str(r["source_id"]),
+                "target": str(r["target_id"]),
+                "relation": r["relation"],
+                "weight": r["weight"],
+            }
+            for r in links
+        ],
+        "seed_id": str(seed["id"]),
+        "depth": depth,
+    }
+
+
 @router.get("/links", response_model=list[dict[str, Any]])
 async def list_links(
     ctx: WorkspaceCtx,

@@ -129,6 +129,53 @@ export type Entity = {
   last_seen_at: string | null;
 };
 
+/** A node as returned by /graph and /graph/entities/{id}/neighbors. */
+export type GraphNode = {
+  id: string;
+  name: string;
+  entity_type: string;
+  description: string | null;
+  mention_count: number;
+};
+
+/**
+ * An edge as returned by the neighbourhood endpoint. Note the field names are
+ * `source`/`target` (not `source_id`), matching that endpoint's shape; the flat
+ * `/graph` payload uses `source_id`/`target_id`.
+ */
+export type GraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  weight: number;
+};
+
+export type GraphSlice = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  seed_id: string;
+  depth: number;
+};
+
+/** The full entity payload from /graph/entities/{id}. */
+export type EntityDetail = Entity & {
+  links: {
+    id: string;
+    relation: string;
+    weight: number;
+    direction: 'in' | 'out';
+    entity: Pick<Entity, 'id' | 'name' | 'entity_type'>;
+  }[];
+  mentions: {
+    chunk_id: string;
+    confidence: number;
+    source_kind: SourceKind;
+    source_id: string;
+    source_title: string;
+  }[];
+};
+
 export type KnowledgeLink = {
   id: string;
   relation: string;

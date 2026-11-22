@@ -1,19 +1,36 @@
 <script lang="ts">
+  /**
+   * Document detail: header, live processing state, extracted text.
+   *
+   * Polling is driven by `ProcessingStatus`' inputs being stale, not by a timer
+   * for its own sake: the interval is created when the document is mid-pipeline
+   * and cleared the moment it is not. A page that polls forever is a page that
+   * keeps a laptop awake for no reason.
+   */
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { apiFetch, NexusApiError } from '$lib/api/client';
   import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import type { DocumentDetail } from '$lib/api/types';
-  import StatusPill from '$lib/components/StatusPill.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
+  import ProcessingStatus from '$lib/components/documents/ProcessingStatus.svelte';
+  import DocumentPreview from '$lib/components/documents/DocumentPreview.svelte';
   import { formatBytes, relativeTime } from '$lib/utils/format';
 
   let document = $state<DocumentDetail | null>(null);
   let error = $state<{ message: string; code?: string } | null>(null);
   let loading = $state(true);
   let polling: ReturnType<typeof setInterval> | null = null;
+  let retrying = $state(false);
 
   const id = $derived(page.params.id);
+
+  function stopPolling() {
+    if (polling) {
+      clearInterval(polling);
+      polling = null;
+    }
+  }
 
   async function fetchDocument() {
     try {
@@ -22,16 +39,15 @@
       // Poll only while there is genuinely something to wait for.
       if (document.status === 'processing' || document.status === 'pending') {
         polling ??= setInterval(fetchDocument, 2500);
-      } else if (polling) {
-        clearInterval(polling);
-        polling = null;
+      } else {
+        stopPolling();
       }
     } catch (err) {
       error =
         err instanceof NexusApiError
           ? { message: err.message, code: err.code }
           : { message: 'Could not load this document.' };
-      if (polling) clearInterval(polling);
+      stopPolling();
     } finally {
       loading = false;
     }
@@ -39,14 +55,22 @@
 
   onMount(() => {
     void fetchDocument();
-    return () => {
-      if (polling) clearInterval(polling);
-    };
+    return stopPolling;
   });
 
   async function reprocess() {
-    await apiFetch(wsPath(`/documents/${id}/reprocess`), { method: 'POST' });
-    void fetchDocument();
+    retrying = true;
+    try {
+      await apiFetch(wsPath(`/documents/${id}/reprocess`), { method: 'POST' });
+      await fetchDocument();
+    } catch (err) {
+      error =
+        err instanceof NexusApiError
+          ? { message: err.message, code: err.code }
+          : { message: 'Could not queue that for reprocessing.' };
+    } finally {
+      retrying = false;
+    }
   }
 </script>
 
@@ -60,25 +84,29 @@
   {:else if loading}
     <div class="skeleton h-8 w-64"></div>
   {:else if document}
-    <header class="space-y-2">
+    <header class="space-y-3">
       <div class="flex flex-wrap items-center gap-3">
         <h1 class="text-xl font-semibold tracking-tight text-ink-50">{document.title}</h1>
-        <StatusPill status={document.status} stage={document.processing_stage} />
       </div>
 
       <p class="text-xs text-ink-500">
-        {document.mime_type ?? 'File'}
+        {document.filename}
         {#if document.page_count}· {document.page_count} pages{/if}
         {#if document.file_size}· {formatBytes(document.file_size)}{/if}
         · {document.chunk_count} searchable passages
         · updated {relativeTime(document.updated_at)}
       </p>
 
-      {#if document.error_message}
-        <div class="rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs text-red-300">
-          {document.error_message}
-          <button class="ml-2 underline hover:no-underline" onclick={reprocess}>Retry processing</button>
-        </div>
+      <ProcessingStatus
+        status={document.status}
+        stage={document.processing_stage}
+        errorMessage={document.error_message}
+      />
+
+      {#if document.status === 'failed'}
+        <button class="btn-ghost px-2 py-1 text-xs" onclick={reprocess} disabled={retrying}>
+          {retrying ? 'Queueing…' : 'Retry processing'}
+        </button>
       {/if}
     </header>
 
@@ -89,25 +117,6 @@
       </section>
     {/if}
 
-    {#if document.status === 'processing'}
-      <p class="text-xs text-ink-400">
-        Processing — this page updates automatically. Retrieval will not use this document until it
-        is ready.
-      </p>
-    {/if}
-
-    <section class="space-y-2">
-      <h2 class="text-xs font-medium uppercase tracking-wide text-ink-500">Extracted text</h2>
-      {#if document.raw_text}
-        <div class="max-h-[28rem] overflow-y-auto rounded-xl border border-ink-800 bg-ink-900/40 p-4">
-          <pre class="whitespace-pre-wrap font-sans text-[13px] leading-relaxed text-ink-300">
-{document.raw_text}</pre>
-        </div>
-      {:else}
-        <p class="rounded-lg border border-ink-800 px-4 py-6 text-center text-xs text-ink-500">
-          Text has not been extracted yet.
-        </p>
-      {/if}
-    </section>
+    <DocumentPreview {document} />
   {/if}
 </div>

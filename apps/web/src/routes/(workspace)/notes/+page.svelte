@@ -3,7 +3,7 @@
   import { apiFetch, NexusApiError } from '$lib/api/client';
   import type { NoteSummary } from '$lib/api/types';
   import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
-  import StatusPill from '$lib/components/StatusPill.svelte';
+  import ProcessingStatus from '$lib/components/documents/ProcessingStatus.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import { relativeTime } from '$lib/utils/format';
@@ -119,7 +119,7 @@
               {/if}
             </p>
           </div>
-          <StatusPill status={note.status} stage={note.processing_stage} />
+          <ProcessingStatus status={note.status} stage={note.processing_stage} compact />
         </li>
       {/each}
     </ul>
