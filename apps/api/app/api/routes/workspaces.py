@@ -12,10 +12,10 @@ import uuid
 from typing import Any
 
 import asyncpg
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Query, Response
 from fastapi.responses import JSONResponse
 
-from app.core import tenancy
+from app.core import audit, tenancy
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx
 from app.core.errors import Conflict, NotFound, Unprocessable
 from app.schemas.common import (
@@ -160,8 +160,82 @@ async def delete_workspace(ctx: WorkspaceCtx, conn: UserConn) -> Response:
         raise Forbidden("Only the workspace owner can delete it", code="insufficient_role")
     if ctx.personal:
         raise Unprocessable("Your personal workspace cannot be deleted", code="personal_workspace")
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="workspace.delete",
+        target_type="workspace",
+        target_id=ctx.id,
+        target_label=ctx.name,
+    )
     await conn.execute("delete from public.workspaces where id=$1", ctx.id)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Audit trail (security §7, rule 10)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{workspace_id}/audit", response_model=dict)
+async def list_audit_events(
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    limit: int = Query(default=50, ge=1, le=200),
+    before: str | None = Query(default=None, description="Keyset cursor: created_at"),
+    action: str | None = Query(default=None, description="Filter to one action prefix"),
+    target_id: str | None = None,
+) -> dict[str, Any]:
+    """Recent sensitive operations, newest first.
+
+    Admin-only, enforced twice: `require_manage` here and
+    `can_manage_workspace` in the RLS select policy. A member asking is a 403
+    rather than an empty list, because "you cannot see this" and "nothing has
+    happened" are different answers and returning the latter is a lie.
+
+    Keyset pagination on `(created_at, id)` rather than OFFSET: an audit table
+    only grows at the tail, so an offset would drift under concurrent writes and
+    silently skip rows — the one failure mode an audit view cannot have.
+    """
+    tenancy.require_manage(ctx)
+
+    rows = await conn.fetch(
+        """select a.id, a.action, a.target_type, a.target_id, a.target_label,
+                  a.detail, a.request_id, a.created_at, a.actor_id,
+                  p.display_name as actor_name
+           from public.audit_events a
+           left join public.profiles p on p.id = a.actor_id
+           where a.workspace_id = $1
+             and ($2::timestamptz is null or a.created_at < $2)
+             and ($3::text is null or a.action like $3 || '%')
+             and ($4::uuid is null or a.target_id = $4)
+           order by a.created_at desc, a.id desc
+           limit $5""",
+        ctx.id,
+        before,
+        action,
+        target_id,
+        limit,
+    )
+    items = [
+        {
+            "id": str(r["id"]),
+            "action": r["action"],
+            "target_type": r["target_type"],
+            "target_id": str(r["target_id"]) if r["target_id"] else None,
+            "target_label": r["target_label"],
+            "detail": r["detail"],
+            "request_id": r["request_id"],
+            "actor_id": str(r["actor_id"]) if r["actor_id"] else None,
+            # A deleted account leaves the event with no name — shown as such
+            # rather than dropped, since the action still happened.
+            "actor_name": r["actor_name"],
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+    next_cursor = items[-1]["created_at"] if len(items) == limit else None
+    return {"items": items, "next_cursor": next_cursor}
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +301,14 @@ async def add_member(
     except asyncpg.UniqueViolationError as exc:
         raise Conflict("That person is already a member", code="already_member") from exc
 
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="workspace.member.add",
+        target_type="member",
+        target_id=str(target["id"]),
+        detail={"role": payload.role, "email": payload.email},
+    )
     display = await conn.fetchval(
         "select display_name from public.profiles where id=$1", target["id"]
     )
@@ -249,11 +331,24 @@ async def update_member_role(
             "The owner's role cannot be changed; transfer ownership instead",
             code="cannot_modify_owner",
         )
+    previous = await conn.fetchval(
+        "select role from public.workspace_members where workspace_id=$1 and user_id=$2",
+        ctx.id,
+        member_id,
+    )
     result = await conn.execute(
         "update public.workspace_members set role=$3 where workspace_id=$1 and user_id=$2",
         ctx.id,
         member_id,
         payload.role,
+    )
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="workspace.member.role_change",
+        target_type="member",
+        target_id=member_id,
+        detail={"previous_role": previous, "new_role": payload.role},
     )
     if not str(result).endswith("1"):
         raise NotFound("Member not found")
@@ -266,7 +361,9 @@ async def update_member_role(
     response_class=Response,
     response_model=None,
 )
-async def remove_member(member_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Response:
+async def remove_member(
+    member_id: str, ctx: WorkspaceCtx, conn: UserConn, self_user: CurrentUser
+) -> Response:
     """Remove a member, or leave yourself. The owner cannot be removed."""
     if member_id != ctx.id and not ctx.can_manage:
         from app.core.errors import Forbidden
@@ -274,6 +371,10 @@ async def remove_member(member_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Re
         raise Forbidden("Only owners and admins can remove members", code="insufficient_role")
     if member_id == ctx.owner_id:
         raise Unprocessable("The workspace owner cannot be removed", code="cannot_remove_owner")
+    # A member removing themselves is "leave"; an admin removing someone is
+    # "remove". Same SQL, different fact — and an audit trail that cannot tell
+    # them apart answers the wrong question.
+    action = "workspace.member.leave" if member_id == self_user.id else "workspace.member.remove"
     result = await conn.execute(
         "delete from public.workspace_members where workspace_id=$1 and user_id=$2",
         ctx.id,
@@ -281,4 +382,11 @@ async def remove_member(member_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Re
     )
     if not str(result).endswith("1"):
         raise NotFound("Member not found")
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action=action,
+        target_type="member",
+        target_id=member_id,
+    )
     return Response(status_code=204)

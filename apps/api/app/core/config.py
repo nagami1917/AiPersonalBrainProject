@@ -93,6 +93,22 @@ class Settings(BaseSettings):
     storage_bucket: str = "nexus-documents"
     sentry_dsn: str = ""
 
+    # --- rate limits (security §7, rule 8) -----------------------------------
+    # Fixed window, counted per user AND per workspace. Sized so a person
+    # chatting normally never notices: 30 AI calls/minute is two questions a
+    # second for a minute, and a streaming answer occupies one slot for its
+    # whole duration. The workspace ceiling is the shared-cost guard.
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: float = 60.0
+    rate_limit_user_calls: int = 30
+    rate_limit_workspace_calls: int = 240
+
+    # --- upload content inspection (security §7, rule 9) ---------------------
+    # Magic-byte sniffing reads this many bytes. Every supported format has a
+    # signature within the first 512, and a document that does not is a
+    # document we cannot classify — which is the point of checking.
+    sniff_bytes: int = 4096
+
     @field_validator("pinned_embedding_dim")
     @classmethod
     def _dim_must_match_pinned_model(cls, v: int, info) -> int:  # type: ignore[no-untyped-def]

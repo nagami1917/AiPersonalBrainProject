@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.ai.providers import LLM, Embedder
 from app.ai.rag import GroundedAnswer
+from app.core import guard
 from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx, get_embedder, get_llm
 from app.core.errors import NotFound
@@ -49,6 +50,8 @@ async def chat(
     llm: LLM = Depends(get_llm),
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
+    # Rule 8: the provider call is the expensive part, so it is what is counted.
+    await guard.ai_call(user.id, ctx.id, cost="chat")
     message_id, conversation_id, answer = await chat_service.answer(
         conn,
         workspace_id=ctx.id,
@@ -143,6 +146,9 @@ async def stream(
     The transaction must stay open for the whole stream, so ownership of the
     connection moves into the generator rather than the route's dependency.
     """
+    # Rule 8: counted before the stream opens, while a real 429 is still
+    # possible. A limit enforced mid-stream could only be an in-band event.
+    await guard.ai_call(user.id, ctx.id, cost="chat")
     return await _stream_response(
         workspace_id=ctx.id,
         user=user,

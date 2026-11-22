@@ -28,6 +28,7 @@ from app.ai.ingestion import (
 )
 from app.ai.providers import Embedder
 from app.core.config import Settings
+from app.core.upload_validation import UploadValidationError, validate_content
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +118,31 @@ async def _load_target(
     # file_path is the storage key (schema column). raw_text short-circuits the
     # download for re-indexing and for text pasted directly.
     if not text and row["file_path"]:
-        data = await _download(row["file_path"], settings)
+        # Rule 5: the stored path must sit inside this document's workspace.
+        # The worker uses the service role, which bypasses storage policies — so
+        # this check is the only thing standing between a corrupted row and a
+        # cross-tenant fetch.
+        stored_path = str(row["file_path"])
+        if not stored_path.startswith(f"{row['workspace_id']}/"):
+            raise ExtractionError(
+                "This document's file is stored outside its workspace.",
+                code="storage_path_escape",
+            )
+
+        data = await _download(stored_path, settings)
+
+        # Rule 9, second half: the bytes exist here for the first time, so this
+        # is where content validation actually happens. Truncated to the sniff
+        # window — every signature we check lives in the first few KB.
+        try:
+            validate_content(
+                data[: settings.sniff_bytes],
+                mime_type=row["mime_type"] or "",
+                filename=stored_path.rsplit("/", 1)[-1],
+            )
+        except UploadValidationError as exc:
+            raise ExtractionError(exc.message, code=exc.code) from exc
+
         result = extract(data, row["mime_type"] or "", row["title"])
         text = result.text
         page_map = result.page_map or None

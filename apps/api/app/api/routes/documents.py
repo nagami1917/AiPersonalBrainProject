@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
-from app.core import tenancy
+from app.core import audit, tenancy
 from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx
-from app.core.errors import Conflict, NotFound, PayloadTooLarge, Unprocessable
+from app.core.errors import Conflict, NotFound, Unprocessable
+from app.core.upload_validation import (
+    DeclaredFile,
+    UploadValidationError,
+    validate_declared,
+)
 from app.repositories import knowledge as repo
 from app.schemas.documents import (
     ChunkPreview,
@@ -93,14 +99,20 @@ async def create_upload_url(
 ) -> UploadUrlResponse:
     tenancy.require_write(ctx)
 
-    if payload.file_size > settings.max_upload_bytes:
-        raise PayloadTooLarge(
-            f"File is larger than the {settings.max_upload_bytes // (1024 * 1024)} MB limit"
+    # Rule 9, first half: extension, declared type, size, and that the first two
+    # agree. The content half runs in the worker, where the bytes exist.
+    try:
+        validate_declared(
+            DeclaredFile(
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                file_size=payload.file_size,
+            ),
+            allowed_mime=settings.allowed_mime_types,
+            max_bytes=settings.max_upload_bytes,
         )
-    if payload.mime_type not in settings.allowed_mime_types:
-        raise Unprocessable(
-            f"Unsupported file type: {payload.mime_type}", code="unsupported_file_type"
-        )
+    except UploadValidationError as exc:
+        raise Unprocessable(exc.message, code=exc.code) from exc
 
     document_id = str(uuid.uuid4())
     file_path = f"{ctx.id}/{document_id}/{_safe_filename(payload.filename)}"
@@ -175,6 +187,15 @@ async def confirm_upload(
         ctx.id,
         payload.document_id,
     )
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="document.upload",
+        target_type="document",
+        target_id=payload.document_id,
+        target_label=payload.title,
+        detail={"filename": payload.filename, "file_size": size},
+    )
     return {
         "document": _summary_record(record, payload.tags).model_dump(mode="json"),
         "job_id": str(job_id),
@@ -210,7 +231,10 @@ async def get_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> D
     return DocumentDetail(
         **_summary_record(record, tags).model_dump(),
         raw_text=data.get("raw_text"),
-        file_path=data.get("file_path"),
+        # Withheld deliberately (security §7, rule 5): the storage path is not
+        # needed by any screen — downloads go through /download-url — and
+        # exposing it hands an attacker the exact string to try to manipulate.
+        file_path=None,
         error_message=data.get("error_message"),
         version=data.get("version", 1),
         embedding_model=data.get("embedding_model"),
@@ -247,8 +271,19 @@ async def update_document(
 @router.delete("/{document_id}", status_code=204, response_class=Response, response_model=None)
 async def delete_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Response:
     tenancy.require_write(ctx)
+    existing = await repo.get_document(conn, document_id, ctx.id)
     if not await repo.soft_delete_document(conn, document_id, ctx.id):
         raise NotFound("Document not found")
+    # Recorded after the delete succeeds but keyed to an id that no longer
+    # resolves — which is exactly why audit_events has no FK on target_id.
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="document.delete",
+        target_type="document",
+        target_id=document_id,
+        target_label=existing["title"] if existing else None,
+    )
     await conn.fetchval(
         """select public.enqueue_job(
              p_workspace_id => $1, p_job_type => 'purge', p_document_id => $2)""",
@@ -256,6 +291,59 @@ async def delete_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -
         document_id,
     )
     return Response(status_code=204)
+
+
+@router.get("/{document_id}/download-url", response_model=dict)
+async def create_download_url(
+    document_id: str,
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """A short-lived signed URL for the original file.
+
+    Rule 5: users must not be able to download arbitrary storage objects, and
+    rule 7: downloads use signed URLs with short expiration. Both are satisfied
+    by the same property — **the path never comes from the client**. It comes
+    from the document row the caller just proved they can read.
+
+    Why that matters beyond the obvious: a route taking a `path` parameter
+    (or echoing one back) would accept `../other-workspace/...`; Supabase's
+    policies would still refuse the *bytes* for a different workspace, but the
+    API must not be the thing relying on a second system's policy to catch it.
+    Membership is checked here, the path is derived here, and the TTL is short
+    enough that a leaked URL is a brief problem rather than a permanent one.
+
+    Expiry is returned so the client can refresh instead of showing a broken
+    image after a minute.
+    """
+    record = await repo.get_document(conn, document_id, ctx.id)
+    if record is None or not record["file_path"]:
+        raise NotFound("Document not found")
+
+    stored_path = str(record["file_path"])
+    # Belt and braces: the stored path must still sit inside this workspace's
+    # prefix. A row corrupted by any means is refused rather than signed.
+    if not stored_path.startswith(f"{ctx.id}/"):
+        raise NotFound("Document not found")
+
+    url = storage_service.create_signed_download_url(settings, stored_path)
+    expires_at = datetime.now(UTC) + timedelta(seconds=settings.signed_download_ttl_seconds)
+
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="document.download",
+        target_type="document",
+        target_id=document_id,
+        target_label=record["title"],
+    )
+    return {
+        "url": url,
+        "expires_at": expires_at.isoformat(),
+        "filename": record["filename"],
+        "mime_type": record["mime_type"],
+    }
 
 
 @router.get("/{document_id}/status", response_model=StatusResponse)
@@ -317,5 +405,12 @@ async def reprocess(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> dict
              p_document_id => $2, p_priority => 50)""",
         ctx.id,
         document_id,
+    )
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="document.reprocess",
+        target_type="document",
+        target_id=document_id,
     )
     return {"job_id": str(job_id), "status": "queued"}

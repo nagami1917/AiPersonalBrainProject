@@ -28,7 +28,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.ai.providers import LLM, Embedder
-from app.core import tenancy
+from app.core import guard, tenancy
 from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, get_embedder, get_llm
 from app.core.errors import NexusError, NotFound
@@ -101,6 +101,7 @@ async def chat(
     from app.services import chat_service
 
     ctx = await _authorize(conn, user_id=user.id, workspace_id=request.workspace_id)
+    await guard.ai_call(user.id, ctx.id, cost="chat")
 
     message_id, conversation_id, answer = await chat_service.answer(
         conn,
@@ -138,6 +139,9 @@ async def stream(
     from app.api.routes.chat import _stream_response
 
     ctx = await _authorize(conn, user_id=user.id, workspace_id=request.workspace_id)
+    # Counted before the stream opens, for the same reason authorisation is:
+    # once bytes are flowing, a 429 can only be an in-band surprise.
+    await guard.ai_call(user.id, ctx.id, cost="chat")
     inner = request.resolved()
     return await _stream_response(
         workspace_id=ctx.id,
@@ -174,6 +178,7 @@ async def summarize(
     workspace, so a guessed id from another tenant is a 404.
     """
     ctx = await _authorize(conn, user_id=user.id, workspace_id=request.workspace_id)
+    await guard.ai_call(user.id, ctx.id, cost="summarize")
 
     if bool(request.text) == bool(request.source_id):
         raise NexusError(
