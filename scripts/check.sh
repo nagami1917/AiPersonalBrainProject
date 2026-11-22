@@ -21,6 +21,9 @@ else
   echo "==> backend: database tests skipped (DATABASE_URL unset)"
 fi
 
+echo "==> frontend: unit tests"
+(cd apps/web && npm run test --silent)
+
 echo "==> frontend: svelte-check"
 (cd apps/web && npm run check)
 

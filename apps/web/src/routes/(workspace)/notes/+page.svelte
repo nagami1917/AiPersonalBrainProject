@@ -111,7 +111,13 @@
             <a href="/notes/{note.id}" class="block truncate text-sm text-ink-100 hover:text-accent-400">
               {note.title}
             </a>
-            <p class="text-[11px] text-ink-500">updated {relativeTime(note.updated_at)}</p>
+            <p class="flex items-center gap-1.5 text-[11px] text-ink-500">
+              <span>updated {relativeTime(note.updated_at)}</span>
+              {#if note.tags.length > 0}
+                <span>·</span>
+                <span class="truncate">{note.tags.join(', ')}</span>
+              {/if}
+            </p>
           </div>
           <StatusPill status={note.status} stage={note.processing_stage} />
         </li>

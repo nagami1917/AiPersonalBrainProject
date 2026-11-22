@@ -360,6 +360,61 @@ write time so a rename or delete cannot rewrite history.
 
 ---
 
+### 3.7a Note links, stats and suggestions
+
+#### `GET` `…/notes/{id}` — backlinks and outgoing links
+
+The note detail response carries both directions of the note's wiki-link graph:
+
+```json
+{
+  "backlinks": [{"id": "uuid", "title": "Q2 Plan", "status": "ready", "updated_at": "…"}],
+  "outgoing_links": [
+    {"target_title": "Q3 Budget", "target_id": "uuid", "resolved": true, "status": "ready"},
+    {"target_title": "Not written yet", "target_id": null, "resolved": false, "status": null}
+  ]
+}
+```
+
+`[[wiki links]]` are extracted from the body on every write, resolved against note titles in
+the same workspace, and stored in `note_links`. Matching is case- and whitespace-insensitive;
+the *stored* title keeps the author's capitalisation, because that is what the graph displays.
+
+Three properties are deliberate:
+
+- **An unresolved link is kept, not dropped.** Writing `[[Q3 Budget]]` before that note exists
+  is a promise, and the panel shows it as unwritten rather than pretending it was never made.
+- **Creating a note re-resolves outstanding links to its title.** Otherwise a link written
+  first would stay dangling forever.
+- **A note is never its own backlink**, and links never cross workspaces — a `[[link]]` in one
+  workspace cannot resolve to a note in another.
+
+#### `GET` `…/stats`
+
+One query, because the Welcome page's cards are read together and per-card requests would let
+the numbers disagree on screen. Counts exclude soft-deleted rows.
+
+```json
+{"workspace_id": "uuid", "notes": 12, "notes_ready": 9, "documents": 4,
+ "documents_ready": 3, "documents_processing": 1, "documents_failed": 0,
+ "collections": 2, "tags": 7, "entities": 31, "links": 44, "chunks": 210,
+ "conversations": 5, "note_links": 9}
+```
+
+#### `GET` `…/suggestions?note_id=&limit=`
+
+Pairs of notes that are **related but not yet linked, in either direction**. Already-linked
+pairs are excluded before ranking — a suggestion panel that proposes edges the graph already
+has is noise the user learns to ignore.
+
+Ranking is shared-tag count first, embedding proximity second: a shared tag is a claim the
+user made deliberately, a vector is a guess. `reason` states the basis, and the UI shows it.
+
+Pairs are ordered by title, not by id. (Constraining both orderings silently drops every pair
+whose two orderings disagree — roughly half of them.)
+
+---
+
 ### 3.8 Graph
 
 | Method | Path | Purpose |
