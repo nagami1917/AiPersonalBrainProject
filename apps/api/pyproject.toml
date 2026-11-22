@@ -1,0 +1,33 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "A", "C4", "RET", "PL"]
+ignore = [
+  "PLR0913",  # several service functions legitimately take many keywords
+  "PLR0912",  # ingest is a pipeline; branching there is explicit on purpose
+  "PLR0915",
+  "B008",     # FastAPI Depends() in defaults is the framework idiom
+  "A003",     # payload field named "type" matches the documented API
+  "PLR2004",  # HTTP status literals (404/429) read better than named constants here
+  "PLW0603",  # module-level pool singleton is the point
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = false
+plugins = []
+ignore_missing_imports = true
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

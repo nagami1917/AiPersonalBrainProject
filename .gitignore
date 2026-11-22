@@ -1,0 +1,43 @@
+# --- secrets -----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- node --------------------------------------------------------------------
+node_modules/
+.svelte-kit/
+build/
+dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# --- supabase local stack ----------------------------------------------------
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# --- os / editor -------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- vercel / fly ------------------------------------------------------------
+.vercel/
