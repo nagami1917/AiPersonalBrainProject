@@ -26,6 +26,8 @@ from app.api.routes import (
     jobs,
     notes,
     search,
+    stats,
+    suggestions,
     workspaces,
 )
 from app.core.config import get_settings
@@ -80,6 +82,8 @@ def create_app() -> FastAPI:
         notes,
         collections,
         search,
+        stats,
+        suggestions,
         chat,
         conversations,
         graph,

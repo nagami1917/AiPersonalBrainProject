@@ -24,6 +24,24 @@ class NoteSummary(BaseModel):
     updated_at: datetime
 
 
+class NoteBacklink(BaseModel):
+    """A note that links here. Titles are the link contract, so they travel."""
+
+    id: str
+    title: str
+    status: ItemStatus
+    updated_at: datetime
+
+
+class NoteOutgoingLink(BaseModel):
+    target_title: str
+    target_id: str | None = None
+    # False means the link names a note that does not exist (yet). The UI shows
+    # it, unclickable, instead of hiding a reference the user deliberately made.
+    resolved: bool = False
+    status: ItemStatus | None = None
+
+
 class NoteDetail(NoteSummary):
     content: str | None = None
     content_format: str = "markdown"
@@ -31,6 +49,8 @@ class NoteDetail(NoteSummary):
     version: int = 1
     embedding_model: str | None = None
     chunk_count: int = 0
+    backlinks: list[NoteBacklink] = Field(default_factory=list)
+    outgoing_links: list[NoteOutgoingLink] = Field(default_factory=list)
 
 
 class NoteCreate(BaseModel):

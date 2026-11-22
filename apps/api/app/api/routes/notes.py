@@ -12,7 +12,15 @@ from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx
 from app.core.errors import Forbidden, NotFound
 from app.repositories import knowledge as repo
-from app.schemas.documents import NoteCreate, NoteDetail, NoteSummary, NoteUpdate, StatusResponse
+from app.schemas.documents import (
+    NoteBacklink,
+    NoteCreate,
+    NoteDetail,
+    NoteOutgoingLink,
+    NoteSummary,
+    NoteUpdate,
+    StatusResponse,
+)
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/notes", tags=["notes"])
 
@@ -85,6 +93,12 @@ async def create_note(
     if payload.tags:
         await repo.replace_tags(conn, ctx.id, payload.tags, note_id=note_id)
 
+    # Links are recomputed on every write, from the body, in one place. A note
+    # created now may satisfy a [[link]] someone wrote yesterday, so resolve
+    # outstanding references to the new title before storing this note's own.
+    await repo.reindex_backlinks_to_title(conn, ctx.id, payload.title, note_id)
+    await repo.replace_note_links(conn, ctx.id, note_id, repo.extract_wiki_links(payload.content))
+
     job_id = await conn.fetchval(
         """select public.enqueue_job(
              p_workspace_id => $1, p_job_type => 'ingest_note', p_note_id => $2)""",
@@ -105,6 +119,7 @@ async def get_note(note_id: str, ctx: WorkspaceCtx, conn: UserConn) -> NoteDetai
 
     data = dict(record)
     tags = await repo.tag_names(conn, workspace_id=ctx.id, note_id=note_id)
+    backlinks, outgoing = await _links(conn, ctx.id, note_id)
     return NoteDetail(
         **_summary(record, tags).model_dump(),
         content=data.get("content"),
@@ -113,7 +128,38 @@ async def get_note(note_id: str, ctx: WorkspaceCtx, conn: UserConn) -> NoteDetai
         version=data.get("version", 1),
         embedding_model=data.get("embedding_model"),
         chunk_count=await repo.chunk_count(conn, ctx.id, note_id=note_id),
+        backlinks=backlinks,
+        outgoing_links=outgoing,
     )
+
+
+async def _links(
+    conn: Any, workspace_id: str, note_id: str
+) -> tuple[list[NoteBacklink], list[NoteOutgoingLink]]:
+    """Both directions of a note's graph edges, shaped for the panel."""
+    backlinks = [
+        NoteBacklink(
+            id=str(r["id"]),
+            title=r["title"],
+            status=r["status"],
+            updated_at=r["updated_at"],
+        )
+        for r in await repo.backlinks_for(conn, workspace_id, note_id)
+    ]
+    outgoing = [
+        NoteOutgoingLink(
+            # The stored spelling is the author's own; a target that has since
+            # been created shows its current title instead.
+            target_title=r["resolved_title"] or r["target_title"],
+            # A resolved link is navigable; a dangling one is a promise, and the
+            # UI renders it as plain text rather than a dead end.
+            target_id=str(r["target_note_id"]) if r["target_note_id"] else None,
+            resolved=r["target_note_id"] is not None,
+            status=r["resolved_status"],
+        )
+        for r in await repo.outgoing_links_for(conn, workspace_id, note_id)
+    ]
+    return backlinks, outgoing
 
 
 @router.patch("/{note_id}", response_model=NoteSummary)
@@ -140,6 +186,15 @@ async def update_note(
 
     if payload.tags is not None:
         await repo.replace_tags(conn, ctx.id, payload.tags, note_id=note_id)
+
+    # A title change can satisfy links written elsewhere; a content change can
+    # add or remove this note's own. Only re-resolve when one of them moved.
+    if payload.title is not None:
+        await repo.reindex_backlinks_to_title(conn, ctx.id, payload.title, note_id)
+    if payload.content is not None:
+        await repo.replace_note_links(
+            conn, ctx.id, note_id, repo.extract_wiki_links(payload.content)
+        )
 
     # A content edit changes the searchable representation, so re-index.
     if payload.content is not None:

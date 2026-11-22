@@ -36,6 +36,21 @@ export type NoteSummary = {
   updated_at: string;
 };
 
+export type NoteBacklink = {
+  id: string;
+  title: string;
+  status: DocumentStatus;
+  updated_at: string;
+};
+
+/** A link written in a note body. `resolved: false` means the target is unwritten. */
+export type NoteOutgoingLink = {
+  target_title: string;
+  target_id: string | null;
+  resolved: boolean;
+  status: DocumentStatus | null;
+};
+
 export type NoteDetail = NoteSummary & {
   content: string | null;
   content_format: 'markdown' | 'plain';
@@ -43,6 +58,8 @@ export type NoteDetail = NoteSummary & {
   version: number;
   embedding_model: string | null;
   chunk_count: number;
+  backlinks: NoteBacklink[];
+  outgoing_links: NoteOutgoingLink[];
 };
 
 export type DocumentSummary = {
@@ -131,6 +148,33 @@ export type Job = {
   max_attempts: number;
   error_message: string | null;
   completed_at: string | null;
+};
+
+/** The Welcome page's stat row. One request, so the numbers agree with each other. */
+export type WorkspaceStats = {
+  workspace_id: string;
+  notes: number;
+  notes_ready: number;
+  documents: number;
+  documents_ready: number;
+  documents_processing: number;
+  documents_failed: number;
+  collections: number;
+  tags: number;
+  entities: number;
+  links: number;
+  chunks: number;
+  conversations: number;
+  note_links: number;
+};
+
+/** A pair of notes that are related but not yet linked in either direction. */
+export type SuggestedConnection = {
+  source: { id: string; title: string };
+  target: { id: string; title: string };
+  shared_tags: string[];
+  reason: string;
+  similarity: number | null;
 };
 
 export type Meta = {

@@ -12,6 +12,7 @@ the same deliberate redundancy as before, now keyed on membership.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 import asyncpg
@@ -390,3 +391,143 @@ async def replace_tags(
             tag_id,
             workspace_id,
         )
+
+
+# --- note links (backlinks) --------------------------------------------------
+#
+# Extraction runs at save time rather than on read. A note body is the only
+# place a wiki link can come from, and a panel that re-scanned every note on
+# every visit would get slower as the workspace grows — exactly backwards from
+# what a "what connects to this" panel is for.
+
+_WIKI_LINK = re.compile(r"\[\[([^\[\]|]+)(?:\|[^\[\]]*)?\]\]")
+
+
+def extract_wiki_links(content: str | None) -> list[str]:
+    """The distinct `[[titles]]` in a note body, in the author's own casing.
+
+    Deduplication is on the normalised form (lowercase, collapsed whitespace)
+    so "[[Q3 Budget]]" and "[[q3  budget]]" are one link — but the *first*
+    spelling is what gets stored, because that is what the author wrote and
+    what the graph should show. An alias form (`[[Real Title|label]]`) keeps
+    the title, not the label.
+    """
+    if not content:
+        return []
+    seen: dict[str, str] = {}
+    for raw in _WIKI_LINK.findall(content):
+        title = " ".join(raw.split()).strip()
+        if title:
+            seen.setdefault(title.lower(), title)
+    return list(seen.values())
+
+
+async def replace_note_links(
+    conn: asyncpg.Connection,
+    workspace_id: str,
+    note_id: str,
+    titles: list[str],
+) -> None:
+    """Rewrite one note's outgoing links, resolving targets by title.
+
+    Resolution is a case-insensitive title match inside the workspace, which is
+    the only rule the UI can explain to a user ("link to a note's title"). A
+    title that matches nothing is still recorded, with a null target: the link
+    is the user's intent, and the panel can say "not written yet" rather than
+    pretending the reference was never there.
+    """
+    await conn.execute("delete from public.note_links where source_note_id=$1", note_id)
+    if not titles:
+        return
+
+    await conn.execute(
+        """insert into public.note_links
+             (workspace_id, source_note_id, target_note_id, target_title)
+           select $1, $2, t.id, l.title
+           from unnest($3::text[]) as l(title)
+           left join lateral (
+             select n.id from public.notes n
+             where n.workspace_id = $1
+               and n.deleted_at is null
+               -- never resolve to the linking note itself: a note that names
+               -- its own title is a self-reference, not a backlink edge
+               and n.id <> $2
+               and lower(btrim(n.title)) = lower(btrim(l.title))
+             order by n.updated_at desc
+             limit 1
+           ) t on true
+           on conflict (source_note_id, target_title_normalized) do nothing""",
+        workspace_id,
+        note_id,
+        titles,
+    )
+
+
+async def backlinks_for(
+    conn: asyncpg.Connection, workspace_id: str, note_id: str
+) -> list[asyncpg.Record]:
+    """Notes that link to this one.
+
+    Matched on the resolved target id *or* on the title, because a note written
+    before this note existed still holds a reference to it by name.
+    """
+    return list(
+        await conn.fetch(
+            """select n.id, n.title, n.status, n.updated_at,
+                      coalesce(nl.target_note_id is null, false) as dangling
+               from public.note_links nl
+               join public.notes n on n.id = nl.source_note_id
+               where nl.workspace_id = $1
+                 and n.deleted_at is null
+                 -- a note linking to itself is not a backlink
+                 and nl.source_note_id <> $2
+                 and (nl.target_note_id = $2
+                      or (nl.target_note_id is null and nl.target_title_normalized = (
+                            select lower(btrim(title)) from public.notes where id = $2)))
+               order by n.updated_at desc
+               limit 50""",
+            workspace_id,
+            note_id,
+        )
+    )
+
+
+async def outgoing_links_for(
+    conn: asyncpg.Connection, workspace_id: str, note_id: str
+) -> list[asyncpg.Record]:
+    """Links this note makes, resolved or not — the mirror of `backlinks_for`."""
+    return list(
+        await conn.fetch(
+            """select nl.target_title, nl.target_title_normalized, nl.target_note_id,
+                      n.title as resolved_title, n.status as resolved_status
+               from public.note_links nl
+               left join public.notes n on n.id = nl.target_note_id and n.deleted_at is null
+               where nl.workspace_id = $1 and nl.source_note_id = $2
+               order by nl.target_title
+               limit 100""",
+            workspace_id,
+            note_id,
+        )
+    )
+
+
+async def reindex_backlinks_to_title(
+    conn: asyncpg.Connection, workspace_id: str, title: str, note_id: str
+) -> None:
+    """Re-point unresolved links after a note gains (or changes) its title.
+
+    Without this, a link written before the target existed would stay dangling
+    forever even though the note it names now exists — the panel would be wrong
+    in the one direction that matters.
+    """
+    await conn.execute(
+        """update public.note_links
+           set target_note_id = $3
+           where workspace_id = $1
+             and target_note_id is null
+             and target_title_normalized = lower(btrim($2))
+             and source_note_id <> $3""",
+        workspace_id,
+        title,
+        note_id,
+    )
