@@ -121,6 +121,11 @@ vector_candidates as (
     row_number() over (order by f.emb <=> p_embedding) as rnk
   from filtered f
   where p_embedding is not null
+    -- A zero weight means "this arm is not part of this query", not "score its
+    -- rows zero". Without this the arm still returns ranked rows at 0.0, which
+    -- full-outer-joins into the fused set: a semantic-only search would come back
+    -- full of keyword matches it was explicitly asked to exclude.
+    and p_vector_weight > 0
     and f.emb is not null
     -- ABSOLUTE relevance gate.
     -- HNSW returns k neighbours for ANY query vector, including nonsense, so
@@ -142,6 +147,7 @@ keyword_candidates as (
   from filtered f
   cross join params prm
   where prm.tsq is not null
+    and p_keyword_weight > 0
     and to_tsvector('english', f.body) @@ prm.tsq
   order by score desc
   limit greatest(p_candidate_count, 1)
