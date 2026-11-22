@@ -89,6 +89,22 @@ begin
   get diagnostics n = row_count;
   raise notice 'viewer UPDATE affected % rows (expect 0)', n;
 end $$;
+\echo '-- viewer cannot enqueue work (enqueue_job is SECURITY DEFINER, so its check is load-bearing)'
+do $$
+declare alice_ws uuid;
+begin
+  select id into alice_ws from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111';
+  begin
+    perform public.enqueue_job(
+      p_workspace_id => alice_ws,
+      p_job_type => 'reindex',
+      p_note_id => (select id from public.notes where workspace_id = alice_ws limit 1)
+    );
+    raise notice 'SECURITY FAILURE: viewer enqueued a job in a workspace it cannot write';
+  exception when others then
+    raise notice 'correctly rejected viewer enqueue: %', sqlerrm;
+  end;
+end $$;
 \echo '-- viewer cannot add members either'
 do $$
 declare alice_ws uuid;

@@ -101,7 +101,7 @@ Sign in as `alice@nexus.local` / `password123` and ask *"Where do my deployment 
 - Structure-aware chunking (deterministic, boundary-respecting, ≤800 tokens)
 - Grounding contract: fabricated markers stripped, refusal path never calls the LLM
 - Postgres job queue: `SKIP LOCKED` claim, exponential backoff, dead-letter, staleness sweep
-- Ingest pipeline: download → extract (PDF/DOCX/TXT/MD) → chunk → embed → version-guarded write
+- Ingest pipeline: download → extract (PDF/DOCX/TXT/MD/HTML) → clean/normalize → chunk (700/100) → embed → version-guarded write → summary + entities → mark completed
 - 35 API routes covering documents, notes, collections, tags, search, chat (SSE), conversations, graph, jobs
 - SvelteKit UI: auth, dashboard, streaming assistant with citation chips, documents with honest per-stage progress, notes, search with `matched_arm`, graph, settings
 - Verified: 36 unit tests, 5 database tests, 0 type errors, clean lint

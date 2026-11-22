@@ -72,11 +72,17 @@ class Settings(BaseSettings):
 
     # --- limits / behaviour --------------------------------------------------
     max_upload_bytes: int = 50 * 1024 * 1024
+    # Design §4.1: PDF, DOCX, TXT, Markdown, HTML. `application/msword` is not
+    # listed there — python-docx reads .docx only, so accepting .doc would fail
+    # at extraction time with a confusing error instead of at upload time.
     allowed_mime_types: tuple[str, ...] = (
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "text/plain",
         "text/markdown",
+        "text/x-markdown",
+        "text/html",
+        "application/xhtml+xml",
     )
     cors_allowed_origins: str = "http://localhost:5173"
     worker_concurrency: int = 2

@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ProcessingStage = Literal["extracting", "chunking", "embedding", "entities"]
+ProcessingStage = Literal["extracting", "normalizing", "chunking", "embedding", "entities"]
 
 # Notes and documents share a status vocabulary but not a table.
 ItemStatus = Literal["pending", "processing", "ready", "failed", "archived"]

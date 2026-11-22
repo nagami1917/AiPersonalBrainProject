@@ -238,7 +238,7 @@ Deleting a collection does **not** delete its contents: `notes.collection_id` an
 | `created_by` | `uuid` → `auth.users` | |
 | `title`, `content` | `text` | `content_format` records `markdown` or `plain` |
 | `status` | `text` | `pending \| processing \| ready \| failed \| archived` |
-| `processing_stage` | `text` | `extracting \| chunking \| embedding \| entities` |
+| `processing_stage` | `text` | `extracting \| normalizing \| chunking \| embedding \| entities` |
 | `version` | `integer` | bumped on every content edit; drives re-index and supersede |
 | `summary`, `error_message`, `embedding_model` | | |
 | `*_failure_has_message` | `CHECK` | a `failed` row must carry an `error_message` |

@@ -99,6 +99,13 @@ begin
   -- insert policy; that makes this check load-bearing. Without it, granting
   -- execute to `authenticated` would let any signed-in user queue work in any
   -- workspace whose id they can guess.
+  --
+  -- This is the *user* path only. The worker has no end-user JWT and therefore
+  -- cannot satisfy can_write_workspace by design; it owns the queue and inserts
+  -- directly (see 0011: processing_jobs is service-writable, user-read-only).
+  -- Do not "fix" that by making this function accept a service signal: it is
+  -- SECURITY DEFINER, so current_user inside it is the function owner, and any
+  -- role check here would be either meaningless or an escalation path.
   if not public.can_write_workspace(p_workspace_id) then
     raise exception 'not permitted to enqueue jobs in workspace %', p_workspace_id
       using errcode = '42501';

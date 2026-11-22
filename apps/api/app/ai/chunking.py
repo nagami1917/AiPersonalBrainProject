@@ -14,10 +14,18 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-TARGET_TOKENS = 500
-MAX_TOKENS = 800
-OVERLAP_TOKENS = 80
-MIN_TOKENS = 120
+# Pinned by the design's chunking strategy: ~700-token chunks with ~100 tokens of
+# overlap. MAX_TOKENS is a ceiling, not a second target — a paragraph that would
+# push a chunk past it starts a new one. MIN_TOKENS avoids a one-sentence stub at
+# the end of a document by merging it into its predecessor.
+#
+# These are starting values, not laws. They live in one place so an eval run can
+# change them and re-measure retrieval quality, which is the only reason to
+# change them at all.
+TARGET_TOKENS = 700
+MAX_TOKENS = 900
+OVERLAP_TOKENS = 100
+MIN_TOKENS = 150
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")

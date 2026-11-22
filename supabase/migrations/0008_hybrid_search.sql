@@ -94,6 +94,12 @@ filtered as (
   where c.workspace_id = p_workspace_id
     -- a chunk whose parent was soft-deleted must not surface
     and (n.id is not null or d.id is not null)
+    -- ...and neither must one whose parent is still mid-pipeline. Design §4.1
+    -- marks a source complete only after summary and entity extraction, so
+    -- 'pending'/'processing' rows are partial work: serving them would present a
+    -- half-indexed document as a citable source. Chunks are written before the
+    -- status flips, so this is the gate that keeps that ordering honest.
+    and coalesce(n.status, d.status) = 'ready'
     and (p_collection_id is null or coalesce(n.collection_id, d.collection_id) = p_collection_id)
     and (p_created_after is null or coalesce(n.created_at, d.created_at) >= p_created_after)
     and (p_created_before is null or coalesce(n.created_at, d.created_at) <= p_created_before)

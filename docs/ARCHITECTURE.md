@@ -13,7 +13,7 @@ NEXUS is an AI-powered Personal Knowledge Management System. It is **cloud-hoste
 
 | # | Duty | What it means concretely |
 |---|------|--------------------------|
-| 1 | **Capture** | Accept notes, uploaded files (PDF / DOCX / TXT / MD), and saved conversations. Store originals in Supabase Storage, extract text asynchronously. |
+| 1 | **Capture** | Accept notes, uploaded files (PDF / DOCX / TXT / MD / HTML), and saved conversations. Store originals in Supabase Storage, extract text asynchronously. |
 | 2 | **Organize** | Collections, tags, metadata, document status. Every item is owned by exactly one user. |
 | 3 | **Understand** | Chunk + embed content, extract entities, summarize. Produces a searchable representation separate from the raw file. |
 | 4 | **Connect** | Derive entity ↔ entity and document ↔ document relationships, surfaced in a graph view. |
@@ -154,8 +154,9 @@ sequenceDiagram
   W->>D: claim job FOR UPDATE SKIP LOCKED
   W->>S: download object
   W->>W: extract → normalize → chunk → embed
-  W->>D: INSERT chunks (+vectors), status=ready
-  W->>D: enqueue entity_extraction job
+  W->>D: INSERT chunks (+vectors)
+  W->>D: enqueue summary job, then entities job
+  W->>D: status=ready, completed_at=now()  (last step by spec)
 ```
 
 ### 4.2 Recall (ask)

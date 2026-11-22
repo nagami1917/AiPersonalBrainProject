@@ -20,9 +20,11 @@ values (
   array[
     'application/pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/msword',
     'text/plain',
-    'text/markdown'
+    'text/markdown',
+    'text/x-markdown',
+    'text/html',
+    'application/xhtml+xml'
   ]
 )
 on conflict (id) do update
