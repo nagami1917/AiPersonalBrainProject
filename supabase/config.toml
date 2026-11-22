@@ -1,0 +1,52 @@
+# Supabase CLI project configuration.
+# Docs: https://supabase.com/docs/guides/local-development/cli/config
+project_id = "nexus"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 54329
+pool_mode = "transaction"
+
+[realtime]
+enabled = false          # not used in MVP; graph and chat use REST + SSE
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173/auth/callback"]
+jwt_expiry = 3600
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false   # local only; production requires confirmation
+
+[auth.external.github]
+enabled = false
+
+[analytics]
+enabled = false

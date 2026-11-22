@@ -68,7 +68,7 @@ This is the **only** service allowed to speak to the LLM and embedding providers
 
 ### 3. Data — Supabase Postgres + pgvector + RLS
 Owns: truth. Users, documents, chunks, vectors, entities, jobs, conversations, audit/query logs.
-See [DATA-MODEL.md](./DATA-MODEL.md).
+See [DATABASE.md](./DATABASE.md).
 
 ### 4. Storage — Supabase Storage
 Owns: original bytes (PDF/DOCX/TXT/MD), private bucket, path-prefixed per user.
@@ -241,8 +241,8 @@ Real-time collaboration, public sharing links, mobile app, browser extension, of
 
 ## 8. Related documents
 
-- [DATA-MODEL.md](./DATA-MODEL.md) — tables, indexes, RLS policies
+- [DATABASE.md](./DATABASE.md) — tables, indexes, RLS policies
 - [RAG-PIPELINE.md](./RAG-PIPELINE.md) — extraction, chunking, retrieval, grounding
-- [API-SPEC.md](./API-SPEC.md) — endpoints, payloads, errors
-- [DEPLOYMENT.md](./DEPLOYMENT.md) — Vercel + Fly.io, secrets, environments
+- [API.md](./API.md) — endpoints, payloads, errors
+- [DEVELOPMENT.md](./DEVELOPMENT.md) — Vercel + Fly.io, secrets, environments
 - [ROADMAP.md](./ROADMAP.md) — build order
