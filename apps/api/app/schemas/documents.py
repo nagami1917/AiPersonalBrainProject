@@ -25,7 +25,8 @@ class NoteSummary(BaseModel):
 
 
 class NoteDetail(NoteSummary):
-    body: str | None = None
+    content: str | None = None
+    content_format: str = "markdown"
     error_message: str | None = None
     version: int = 1
     embedding_model: str | None = None
@@ -34,14 +35,16 @@ class NoteDetail(NoteSummary):
 
 class NoteCreate(BaseModel):
     title: str = Field(min_length=1, max_length=500)
-    body: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    content_format: Literal["markdown", "plain"] = "markdown"
     collection_id: str | None = None
     tags: list[str] = Field(default_factory=list)
 
 
 class NoteUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
-    body: str | None = None
+    content: str | None = None
+    content_format: Literal["markdown", "plain"] | None = None
     collection_id: str | None = None
     tags: list[str] | None = None
 
@@ -50,6 +53,7 @@ class DocumentSummary(BaseModel):
     id: str
     kind: Literal["document"] = "document"
     title: str
+    filename: str
     status: ItemStatus
     processing_stage: ProcessingStage | None = None
     collection_id: str | None = None
@@ -64,7 +68,7 @@ class DocumentSummary(BaseModel):
 
 class DocumentDetail(DocumentSummary):
     raw_text: str | None = None
-    storage_path: str | None = None
+    file_path: str | None = None
     error_message: str | None = None
     version: int = 1
     embedding_model: str | None = None
@@ -79,7 +83,7 @@ class UploadUrlRequest(BaseModel):
 
 class UploadUrlResponse(BaseModel):
     document_id: str
-    storage_path: str
+    file_path: str
     upload_url: str
     expires_at: datetime
 
@@ -87,6 +91,9 @@ class UploadUrlResponse(BaseModel):
 class DocumentCreate(BaseModel):
     document_id: str
     title: str = Field(min_length=1, max_length=500)
+    # the original name, echoed back from upload-url; file_path is derived
+    # server-side from the storage object, never trusted from the client
+    filename: str = Field(min_length=1, max_length=255)
     collection_id: str | None = None
     tags: list[str] = Field(default_factory=list)
 
@@ -109,10 +116,10 @@ class StatusResponse(BaseModel):
 class ChunkPreview(BaseModel):
     id: str
     kind: Literal["note", "document"]
-    ordinal: int
+    chunk_index: int
     content: str
     heading_path: str | None = None
-    page_start: int | None = None
+    page_number: int | None = None
     char_start: int | None = None
     char_end: int | None = None
     token_count: int | None = None

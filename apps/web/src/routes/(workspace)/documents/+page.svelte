@@ -46,21 +46,22 @@
     for (const file of Array.from(files)) {
       uploading = file.name;
       try {
-        const { document_id, storage_path } = await apiFetch<{
+        const { document_id, file_path } = await apiFetch<{
           document_id: string;
-          storage_path: string;
+          file_path: string;
         }>(wsPath('/documents/upload-url'), {
           method: 'POST',
           body: { filename: file.name, mime_type: file.type || 'text/plain', file_size: file.size }
         });
 
-        await uploadFile(storage_path, file);
+        await uploadFile(file_path, file);
 
         await apiFetch(wsPath('/documents'), {
           method: 'POST',
           body: {
             document_id,
             title: file.name.replace(/\.[^.]+$/, ''),
+            filename: file.name,
             collection_id: null
           }
         });

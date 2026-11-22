@@ -19,6 +19,9 @@ create index if not exists idx_conversations_workspace_updated
   on public.conversations (workspace_id, updated_at desc)
   where archived_at is null;
 
+alter table public.conversations
+  add constraint conversations_id_workspace_key unique (id, workspace_id);
+
 drop trigger if exists trg_conversations_updated_at on public.conversations;
 create trigger trg_conversations_updated_at
   before update on public.conversations
@@ -49,6 +52,14 @@ create index if not exists idx_chat_messages_conversation_created
 
 create index if not exists idx_chat_messages_workspace on public.chat_messages (workspace_id);
 
+-- A message must live in the same workspace as its conversation.
+alter table public.chat_messages
+  drop constraint if exists chat_messages_conversation_workspace_fkey,
+  add constraint chat_messages_conversation_workspace_fkey
+    foreign key (conversation_id, workspace_id)
+    references public.conversations (id, workspace_id) on delete cascade,
+  add constraint chat_messages_id_workspace_key unique (id, workspace_id);
+
 -- ---------------------------------------------------------------------------
 -- message_sources — the proof, persisted per answer
 -- chunk_id cascades with its chunk: if the passage disappears the citation
@@ -70,7 +81,8 @@ create table if not exists public.message_sources (
   quote        text,
   page         integer check (page is null or page >= 1),
   heading_path text,
-  score        numeric(5,4) check (score is null or (score >= 0 and score <= 1)),
+  relevance_score numeric(5,4)
+                    check (relevance_score is null or (relevance_score >= 0 and relevance_score <= 1)),
   created_at   timestamptz not null default now(),
 
   constraint uq_message_source_marker unique (message_id, marker),
@@ -83,3 +95,17 @@ create table if not exists public.message_sources (
 
 create index if not exists idx_message_sources_message on public.message_sources (message_id);
 create index if not exists idx_message_sources_chunk on public.message_sources (chunk_id);
+
+-- A citation may only join a message to a chunk from the same workspace, and its
+-- parent columns must agree with the chunk. Without this, a citation written with
+-- the service role could point an answer in workspace A at a passage in
+-- workspace B — the exact leak the citation trail exists to make auditable.
+alter table public.message_sources
+  drop constraint if exists message_sources_message_workspace_fkey,
+  add constraint message_sources_message_workspace_fkey
+    foreign key (message_id, workspace_id)
+    references public.chat_messages (id, workspace_id) on delete cascade,
+  drop constraint if exists message_sources_chunk_workspace_fkey,
+  add constraint message_sources_chunk_workspace_fkey
+    foreign key (chunk_id, workspace_id)
+    references public.document_chunks (id, workspace_id) on delete cascade;

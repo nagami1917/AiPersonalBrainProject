@@ -30,7 +30,7 @@ class TextBlock:
 
     text: str
     heading_path: str | None
-    page_start: int | None = None
+    page_number: int | None = None
     page_end: int | None = None
     char_start: int | None = None
     char_end: int | None = None
@@ -38,13 +38,13 @@ class TextBlock:
 
 @dataclass
 class Chunk:
-    ordinal: int
+    chunk_index: int
     content: str
     token_count: int
     heading_path: str | None
     char_start: int | None = None
     char_end: int | None = None
-    page_start: int | None = None
+    page_number: int | None = None
     page_end: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -113,12 +113,12 @@ def split_into_blocks(
             heading_stack.append((level, title))
             continue
 
-        page_start, page_end = _pages_for(start, end, page_map)
+        page_number, page_end = _pages_for(start, end, page_map)
         blocks.append(
             TextBlock(
                 text=paragraph.strip(),
                 heading_path=" > ".join(h[1] for h in heading_stack) or None,
-                page_start=page_start,
+                page_number=page_number,
                 page_end=page_end,
                 char_start=start,
                 char_end=end,
@@ -199,10 +199,10 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[Chunk]:
     chunks: list[Chunk] = []
     buffer: list[TextBlock] = []
     buffer_tokens = 0
-    ordinal = 0
+    chunk_index = 0
 
     def flush() -> None:
-        nonlocal buffer, buffer_tokens, ordinal
+        nonlocal buffer, buffer_tokens, chunk_index
         if not buffer:
             return
         content = "\n\n".join(b.text for b in buffer).strip()
@@ -213,7 +213,7 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[Chunk]:
         heading = next((b.heading_path for b in buffer if b.heading_path), None)
         chunks.append(
             Chunk(
-                ordinal=ordinal,
+                chunk_index=chunk_index,
                 content=content,
                 token_count=tokens,
                 heading_path=heading,
@@ -223,15 +223,15 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[Chunk]:
                 char_end=max(b.char_end for b in buffer if b.char_end is not None)
                 if any(b.char_end is not None for b in buffer)
                 else None,
-                page_start=min(b.page_start for b in buffer if b.page_start is not None)
-                if any(b.page_start is not None for b in buffer)
+                page_number=min(b.page_number for b in buffer if b.page_number is not None)
+                if any(b.page_number is not None for b in buffer)
                 else None,
                 page_end=max(b.page_end for b in buffer if b.page_end is not None)
                 if any(b.page_end is not None for b in buffer)
                 else None,
             )
         )
-        ordinal += 1
+        chunk_index += 1
         buffer, buffer_tokens = [], 0
 
     for block in blocks:
@@ -251,7 +251,7 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[Chunk]:
                         TextBlock(
                             text=overlap,
                             heading_path=block.heading_path,
-                            page_start=block.page_start,
+                            page_number=block.page_number,
                             page_end=block.page_end,
                         )
                     ]
@@ -260,7 +260,7 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[Chunk]:
                 TextBlock(
                     text=unit_text,
                     heading_path=block.heading_path,
-                    page_start=block.page_start,
+                    page_number=block.page_number,
                     page_end=block.page_end,
                     char_start=block.char_start,
                     char_end=block.char_end,
@@ -276,13 +276,13 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[Chunk]:
         prev = chunks[-1]
         merged = f"{prev.content}\n\n{tail.content}".strip()
         chunks[-1] = Chunk(
-            ordinal=prev.ordinal,
+            chunk_index=prev.chunk_index,
             content=merged,
             token_count=approx_tokens(merged),
             heading_path=prev.heading_path or tail.heading_path,
             char_start=prev.char_start,
             char_end=tail.char_end if tail.char_end is not None else prev.char_end,
-            page_start=prev.page_start,
+            page_number=prev.page_number,
             page_end=tail.page_end or prev.page_end,
         )
 

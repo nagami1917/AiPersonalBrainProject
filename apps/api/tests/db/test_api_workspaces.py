@@ -106,7 +106,7 @@ class TestWorkspaceRouting:
         alice_ws = await _workspace_of(ALICE)
         response = await client.post(
             f"/v1/workspaces/{alice_ws}/notes",
-            json={"title": "smuggled", "body": "a viewer must not be able to write this"},
+            json={"title": "smuggled", "content": "a viewer must not be able to write this"},
             headers={"Authorization": f"Bearer {_token(CAROL)}"},
         )
         assert response.status_code == 403
@@ -116,7 +116,7 @@ class TestWorkspaceRouting:
         alice_ws = await _workspace_of(ALICE)
         response = await client.post(
             f"/v1/workspaces/{alice_ws}/notes",
-            json={"title": "An API-created note", "body": "written through the router"},
+            json={"title": "An API-created note", "content": "written through the router"},
             headers={"Authorization": f"Bearer {_token(ALICE)}"},
         )
         assert response.status_code == 202

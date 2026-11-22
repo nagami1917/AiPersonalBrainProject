@@ -35,9 +35,9 @@ IN_PROGRESS_TYPES = ("ingest_note", "ingest_document", "reindex")
 async def handle_job(job: Job, pool, embedder, llm, settings) -> None:  # type: ignore[no-untyped-def]
     async with pool.acquire() as conn:
         target = job.target
-        if job.job_type in IN_PROGRESS_TYPES:
+        if job.type in IN_PROGRESS_TYPES:
             if target is None:
-                raise ValueError(f"{job.job_type} job without a note or document")
+                raise ValueError(f"{job.type} job without a note or document")
             kind, source_id = target
             await ingest.run_ingest(
                 conn,
@@ -47,22 +47,22 @@ async def handle_job(job: Job, pool, embedder, llm, settings) -> None:  # type: 
                 embedder=embedder,
                 settings=settings,
             )
-        elif job.job_type == "summary":
+        elif job.type == "summary":
             if target is not None:
                 kind, source_id = target
                 await enrich.run_summary(
                     conn, kind=kind, source_id=source_id, payload=job.payload, llm=llm
                 )
-        elif job.job_type == "entities":
+        elif job.type == "entities":
             if target is not None:
                 kind, source_id = target
                 await enrich.run_entities(
                     conn, kind=kind, source_id=source_id, payload=job.payload, llm=llm
                 )
-        elif job.job_type == "purge":
+        elif job.type == "purge":
             await purge_document(conn, job, settings)
         else:
-            log.warning("unknown job type %s", job.job_type)
+            log.warning("unknown job type %s", job.type)
 
 
 async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-untyped-def]
@@ -81,7 +81,7 @@ async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-u
         return
 
     row = await conn.fetchrow(
-        "select storage_path, deleted_at from public.documents where id=$1", source_id
+        "select file_path, deleted_at from public.documents where id=$1", source_id
     )
     if row is None:
         return
@@ -89,12 +89,12 @@ async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-u
         log.info("purge skipped: document %s is not soft-deleted", source_id)
         return
 
-    if row["storage_path"]:
+    if row["file_path"]:
         import httpx
 
         url = (
             f"{settings.supabase_url}/storage/v1/object/"
-            f"{settings.storage_bucket}/{row['storage_path']}"
+            f"{settings.storage_bucket}/{row['file_path']}"
         )
         async with httpx.AsyncClient(timeout=60) as client:
             await client.delete(
@@ -123,7 +123,7 @@ async def worker_loop(slot: int) -> None:
                 await asyncio.sleep(settings.worker_poll_interval_seconds)
                 continue
 
-            log.info("claimed job %s (%s)", job.id, job.job_type)
+            log.info("claimed job %s (%s)", job.id, job.type)
             try:
                 await handle_job(job, pool, embedder, llm, settings)
                 async with pool.acquire() as conn:

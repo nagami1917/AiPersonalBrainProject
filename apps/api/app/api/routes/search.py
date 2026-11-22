@@ -43,7 +43,7 @@ async def search(
             chunk_id=hit.chunk_id,
             snippet=hit.content[:600],
             heading_path=hit.heading_path,
-            page=hit.page_start,
+            page=hit.page_number,
             score=display_scores[index],
             matched_arm=hit.matched_arm,
         )

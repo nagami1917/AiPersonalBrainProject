@@ -38,7 +38,7 @@
     try {
       await apiFetch(wsPath('/notes'), {
         method: 'POST',
-        body: { title: title.trim(), body: body.trim() }
+        body: { title: title.trim(), content: body.trim() }
       });
       title = '';
       body = '';

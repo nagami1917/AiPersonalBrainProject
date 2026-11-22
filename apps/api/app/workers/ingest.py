@@ -78,7 +78,7 @@ async def _load_target(
 ) -> IngestTarget | None:
     if kind == "note":
         row = await conn.fetchrow(
-            """select id, workspace_id, title, body, version
+            """select id, workspace_id, title, content, version
                from public.notes where id=$1""",
             source_id,
         )
@@ -89,7 +89,7 @@ async def _load_target(
             id=str(row["id"]),
             workspace_id=str(row["workspace_id"]),
             version=int(row["version"]),
-            text=row["body"] or "",
+            text=row["content"] or "",
         )
 
     row = await conn.fetchrow(
@@ -184,18 +184,18 @@ async def run_ingest(
             for chunk, embedding in zip(chunks, embeddings, strict=True):
                 await conn.execute(
                     f"""insert into public.document_chunks
-                        (workspace_id, {parent_col}, ordinal, content, token_count,
-                         char_start, char_end, page_start, page_end, heading_path,
+                        (workspace_id, {parent_col}, chunk_index, content, token_count,
+                         char_start, char_end, page_number, page_end, heading_path,
                          embedding, embedding_model, version)
                         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector,$12,$13)""",
                     target.workspace_id,
                     target.id,
-                    chunk.ordinal,
+                    chunk.chunk_index,
                     chunk.content,
                     chunk.token_count,
                     chunk.char_start,
                     chunk.char_end,
-                    chunk.page_start,
+                    chunk.page_number,
                     chunk.page_end,
                     chunk.heading_path,
                     _vector_literal(embedding),

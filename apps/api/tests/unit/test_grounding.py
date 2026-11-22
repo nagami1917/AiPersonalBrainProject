@@ -20,7 +20,7 @@ def make_sources(n: int = 2) -> list[Source]:
             document_id=f"doc-{i}",
             document_title=f"Title {i}",
             content=f"Passage number {i} with enough text to be quoted sensibly.",
-            page_start=i,
+            page_number=i,
             score=0.02,
         )
         for i in range(1, n + 1)

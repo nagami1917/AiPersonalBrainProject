@@ -25,7 +25,7 @@ def hit(
         source_title=f"Source {doc}",
         content=content,
         heading_path=None,
-        page_start=1,
+        page_number=1,
         char_start=0,
         char_end=10,
         vector_rank=vrank,

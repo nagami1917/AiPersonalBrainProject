@@ -70,7 +70,8 @@ async def create_note(
             "collection_id": payload.collection_id,
             "created_by": user.id,
             "title": payload.title,
-            "body": payload.body,
+            "content": payload.content,
+            "content_format": payload.content_format,
             "status": "pending",
         },
     )
@@ -99,7 +100,8 @@ async def get_note(note_id: str, ctx: WorkspaceCtx, conn: UserConn) -> NoteDetai
     tags = await repo.tag_names(conn, workspace_id=ctx.id, note_id=note_id)
     return NoteDetail(
         **_summary(record, tags).model_dump(),
-        body=data.get("body"),
+        content=data.get("content"),
+        content_format=data.get("content_format", "markdown"),
         error_message=data.get("error_message"),
         version=data.get("version", 1),
         embedding_model=data.get("embedding_model"),
@@ -121,17 +123,19 @@ async def update_note(
         patch["title"] = payload.title
     if "collection_id" in payload.model_fields_set:
         patch["collection_id"] = payload.collection_id
-    if payload.body is not None:
-        patch["body"] = payload.body
+    if payload.content is not None:
+        patch["content"] = payload.content
         await repo.bump_note_version(conn, note_id, ctx.id)
+    if payload.content_format is not None:
+        patch["content_format"] = payload.content_format
 
     record = await repo.update_note(conn, note_id, ctx.id, patch) or existing
 
     if payload.tags is not None:
         await repo.replace_tags(conn, ctx.id, payload.tags, note_id=note_id)
 
-    # A body edit changes the searchable representation, so re-index.
-    if payload.body is not None:
+    # A content edit changes the searchable representation, so re-index.
+    if payload.content is not None:
         await conn.fetchval(
             """select public.enqueue_job(
                  p_workspace_id => $1, p_job_type => 'ingest_note', p_note_id => $2)""",

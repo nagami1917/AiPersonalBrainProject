@@ -82,7 +82,7 @@ begin
   values (v_coll, v_ws, 'Engineering', 'Notes about building NEXUS')
   on conflict (id) do nothing;
 
-  insert into public.notes (id, workspace_id, collection_id, created_by, title, body, status,
+  insert into public.notes (id, workspace_id, collection_id, created_by, title, content, status,
                             embedding_model, summary)
   values
     (v_note1, v_ws, v_coll, '11111111-1111-1111-1111-111111111111',
@@ -97,11 +97,11 @@ begin
      'Why retrieval fuses two arms with RRF and why the relevance gate is cosine similarity.')
   on conflict (id) do nothing;
 
-  insert into public.documents (id, workspace_id, collection_id, uploaded_by, title, mime_type,
-                                storage_path, file_size, raw_text, page_count, status,
-                                embedding_model, summary)
+  insert into public.documents (id, workspace_id, collection_id, uploaded_by, title,
+                                filename, mime_type, file_path, file_size,
+                                raw_text, page_count, status, embedding_model, summary)
   values (v_doc, v_ws, v_coll, '11111111-1111-1111-1111-111111111111',
-          'thesis-notes.pdf', 'application/pdf',
+          'thesis-notes.pdf', 'thesis-notes.pdf', 'application/pdf',
           v_ws || '/' || v_doc || '/thesis-notes.pdf', 1843200,
           E'Chapter 3: Deployment. Fly secrets are set with flyctl secrets set. The worker claims jobs with FOR UPDATE SKIP LOCKED so two workers never process the same row.',
           4, 'ready', 'text-embedding-3-small', 'Chapter on deployment mechanics and queue claiming.')
@@ -114,7 +114,7 @@ begin
   insert into public.note_tags (note_id, tag_id, workspace_id)
   values (v_note1, v_tag, v_ws) on conflict do nothing;
 
-  insert into public.document_chunks (workspace_id, note_id, ordinal, content, token_count,
+  insert into public.document_chunks (workspace_id, note_id, chunk_index, content, token_count,
                                       heading_path, embedding, embedding_model, version)
   values
     (v_ws, v_note1, 0,
@@ -129,16 +129,16 @@ begin
      'Reciprocal Rank Fusion is used instead of score normalization because cosine distance and ts_rank_cd are on incomparable scales. The fusion constant k is set to 60.',
      30, 'Retrieval scoring notes', pg_temp.pseudo_embedding('alice-fusion'),
      'text-embedding-3-small', 1)
-  on conflict (note_id, ordinal, version) where note_id is not null do nothing;
+  on conflict (note_id, chunk_index, version) where note_id is not null do nothing;
 
-  insert into public.document_chunks (workspace_id, document_id, ordinal, content, token_count,
-                                      page_start, heading_path, embedding, embedding_model, version)
+  insert into public.document_chunks (workspace_id, document_id, chunk_index, content, token_count,
+                                      page_number, heading_path, embedding, embedding_model, version)
   values
     (v_ws, v_doc, 0,
      'Fly secrets are set with flyctl secrets set. The worker claims jobs with FOR UPDATE SKIP LOCKED so two workers never process the same row.',
      31, 3, 'Chapter 3 > Deployment', pg_temp.pseudo_embedding('alice-thesis-1'),
      'text-embedding-3-small', 1)
-  on conflict (document_id, ordinal, version) where document_id is not null do nothing;
+  on conflict (document_id, chunk_index, version) where document_id is not null do nothing;
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ begin
   select id into v_ws from public.workspaces
    where owner_id = '22222222-2222-2222-2222-222222222222';
 
-  insert into public.notes (id, workspace_id, created_by, title, body, status,
+  insert into public.notes (id, workspace_id, created_by, title, content, status,
                             embedding_model, summary)
   values (v_note, v_ws, '22222222-2222-2222-2222-222222222222',
           'Bob private deployment notes',
@@ -160,14 +160,14 @@ begin
           'ready', 'text-embedding-3-small', 'Bob''s own notes about secrets and keys.')
   on conflict (id) do nothing;
 
-  insert into public.document_chunks (workspace_id, note_id, ordinal, content, token_count,
+  insert into public.document_chunks (workspace_id, note_id, chunk_index, content, token_count,
                                       heading_path, embedding, embedding_model, version)
   values
     (v_ws, v_note, 0,
      'Bob also writes about deployment secrets, but this note belongs to a different workspace entirely.',
      17, 'Bob private deployment notes', pg_temp.pseudo_embedding('bob-secrets'),
      'text-embedding-3-small', 1)
-  on conflict (note_id, ordinal, version) where note_id is not null do nothing;
+  on conflict (note_id, chunk_index, version) where note_id is not null do nothing;
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -212,10 +212,10 @@ begin
   on conflict (id) do nothing;
 
   select id into v_chunk from public.document_chunks
-   where workspace_id = v_ws and note_id is not null order by ordinal limit 1;
+   where workspace_id = v_ws and note_id is not null order by chunk_index limit 1;
 
   insert into public.message_sources
-    (workspace_id, message_id, chunk_id, source_kind, note_id, source_title, marker, quote, score)
+    (workspace_id, message_id, chunk_id, source_kind, note_id, source_title, marker, quote, relevance_score)
   values
     (v_ws, v_msg, v_chunk, 'note',
      (select note_id from public.document_chunks where id = v_chunk),
@@ -241,9 +241,9 @@ begin
   -- accumulate duplicates.
   if not exists (
     select 1 from public.processing_jobs
-     where workspace_id = v_ws and job_type = 'summary' and note_id = v_note
+     where workspace_id = v_ws and type = 'summary' and note_id = v_note
   ) then
-    insert into public.processing_jobs (workspace_id, note_id, job_type, status, payload)
+    insert into public.processing_jobs (workspace_id, note_id, type, status, payload)
     values (v_ws, v_note, 'summary', 'queued', '{"reason":"seed"}'::jsonb);
   end if;
 end $$;

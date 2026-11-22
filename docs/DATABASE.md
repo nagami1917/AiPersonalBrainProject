@@ -138,6 +138,40 @@ Two redundant guards are deliberate rather than accidental:
 * **Consistency is enforced by constraint**, not trust. Composite foreign keys and `CHECK`s make
   a cross-workspace link impossible to insert even with service-role access.
 
+### 3.1 Composite foreign keys: the third layer
+
+A plain foreign key proves that the parent row *exists*. It does not prove the parent is in the
+**same workspace**. Since `workspace_id` is denormalised onto children, the two facts could drift
+apart: a service-role script, a future worker bug, or a hand-written migration could file a chunk
+under workspace A while pointing at a note in workspace B. RLS would hide the damage on reads and
+the row would linger — corrupting retrieval silently.
+
+Every parent table therefore exposes `(id, workspace_id)` as a unique key, and every child points
+at the *pair*:
+
+```sql
+alter table public.document_chunks
+  add constraint document_chunks_note_workspace_fkey
+    foreign key (note_id, workspace_id) references public.notes (id, workspace_id)
+    on delete cascade;
+```
+
+Applied to:
+
+| Child | Constrained to the same workspace as |
+|---|---|
+| `document_chunks` | its `note` **or** its `document` (both keys, XOR picks one) |
+| `note_tags`, `document_tags` | the note/document and the tag |
+| `chunk_entities` | the chunk and the entity |
+| `knowledge_links` | `source_id` and `target_id` |
+| `chat_messages` | its conversation |
+| `message_sources` | the message and the chunk |
+
+This is the "workspace-consistency constraint" the database design calls for, and it is the only
+one of the three layers that still holds when the connection is service-role and RLS is bypassed
+entirely. Verified by attempting all seven cross-tenant shapes in `supabase/tests/tenancy.sql`;
+each is refused with a foreign-key violation.
+
 ---
 
 ## 4. Tables
@@ -202,14 +236,14 @@ Deleting a collection does **not** delete its contents: `notes.collection_id` an
 | `workspace_id` | `uuid` | |
 | `collection_id` | `uuid` → `collections` | nullable |
 | `created_by` | `uuid` → `auth.users` | |
-| `title`, `body` | `text` | |
+| `title`, `content` | `text` | `content_format` records `markdown` or `plain` |
 | `status` | `text` | `pending \| processing \| ready \| failed \| archived` |
 | `processing_stage` | `text` | `extracting \| chunking \| embedding \| entities` |
-| `version` | `integer` | bumped on every body edit; drives re-index and supersede |
+| `version` | `integer` | bumped on every content edit; drives re-index and supersede |
 | `summary`, `error_message`, `embedding_model` | | |
 | `*_failure_has_message` | `CHECK` | a `failed` row must carry an `error_message` |
 | `deleted_at` | `timestamptz` | soft delete |
-| FTS | `to_tsvector('english', title \|\| body)` GIN | generated column |
+| FTS | `to_tsvector('english', title \|\| content)` GIN | expression index |
 | in-flight index | `(workspace_id, status) WHERE status IN ('pending','processing')` | the poller's query |
 
 ### 4.6 `documents`
@@ -219,10 +253,12 @@ Same status machinery as `notes`, plus upload-specific columns.
 |---|---|---|
 | `workspace_id`, `collection_id`, `uploaded_by` | | |
 | `title`, `mime_type`, `file_size`, `page_count` | | |
-| `storage_path` | `text` | `{workspace_id}/{document_id}/{filename}` |
+| `filename` | `text` | the user's own name for the file — never derived from a path |
+| `file_path` | `text` | `{workspace_id}/{document_id}/{filename}` |
 | `checksum_sha256` | `text` | duplicate detection **per workspace** |
 | `raw_text` | `text` | extracted text; also the FTS source |
 | `version`, `status`, `processing_stage`, `summary`, `error_message` | | |
+| `completed_at` | `timestamptz` | set when ingest reaches `ready` or `failed` |
 | `deleted_at` | `timestamptz` | |
 
 ### 4.7 `document_chunks` — one table, two possible parents
@@ -234,11 +270,11 @@ This is the schema's most important detail.
 | `workspace_id` | `uuid` | |
 | `note_id` | `uuid` → `notes` | nullable |
 | `document_id` | `uuid` → `documents` | nullable |
-| `ordinal` | `integer` | position within its parent |
+| `chunk_index` | `integer` | position within its parent |
 | `content` | `text` | |
 | `token_count` | `integer` | |
 | `char_start` / `char_end` | `integer` | exact span, so a citation can highlight |
-| `page_start` / `page_end` | `integer` | documents only |
+| `page_number` / `page_end` | `integer` | documents only; `page_number` is the citation anchor |
 | `heading_path` | `text` | e.g. `Chapter 3 > Deployment` |
 | `embedding` | `vector(1536)` | HNSW, `vector_cosine_ops`, m=16, ef_construction=64 |
 | `embedding_model`, `version` | | re-index bookkeeping |
@@ -267,12 +303,12 @@ because that is what retrieval reads.
 Two partial unique indexes give idempotent re-indexing without a coalesce hack:
 
 ```sql
-unique (note_id, ordinal, version)     where note_id is not null
-unique (document_id, ordinal, version) where document_id is not null
+unique (note_id, chunk_index, version)     where note_id is not null
+unique (document_id, chunk_index, version) where document_id is not null
 ```
 
 > Consequence for callers: `ON CONFLICT` on these must repeat the index predicate, e.g.
-> `on conflict (note_id, ordinal, version) where note_id is not null do nothing`.
+> `on conflict (note_id, chunk_index, version) where note_id is not null do nothing`.
 > Naming a bare column list fails with "no unique or exclusion constraint matching".
 
 ### 4.8 `tags`, `note_tags`, `document_tags`
@@ -283,7 +319,8 @@ workspace A cannot label a note in workspace B.
 ### 4.9 `knowledge_entities`, `chunk_entities`, `knowledge_links`
 Entities are extracted per workspace with `unique (workspace_id, normalized_name)`;
 `normalized_name` is lowercased, article-stripped, whitespace-collapsed. `knowledge_links` is a
-weighted triple (`source`, `target`, `relation`) with a `CHECK` forbidding self-loops and a
+weighted triple (`source_id`, `target_id`, `relation`) with a `CHECK` forbidding self-loops
+(`source_id <> target_id`) and a
 triple-unique index so repeated extraction *increments* `weight` rather than duplicating the edge.
 `refresh_entity_mentions(entity_id)` recomputes `mention_count` from `chunk_entities`.
 
@@ -303,7 +340,7 @@ triple-unique index so repeated extraction *increments* `weight` rather than dup
 | `note_id`, `document_id` | `uuid` | exactly one, matching `source_kind` |
 | `source_title` | `text` | snapshot: a deleted note must not blank a historical citation |
 | `marker` | `integer` | the `[n]` in the answer; unique per message |
-| `quote`, `page`, `heading_path`, `score` | | the evidence |
+| `quote`, `page`, `heading_path`, `relevance_score` | | the evidence |
 
 ```sql
 constraint message_sources_kind_matches_parent check (
@@ -320,14 +357,15 @@ correctly.
 | Column | Type | Notes |
 |---|---|---|
 | `workspace_id` | `uuid` | |
-| `job_type` | `text` | `ingest_note \| ingest_document \| reindex \| summary \| entities \| purge` |
+| `type` | `text` | `ingest_note \| ingest_document \| reindex \| summary \| entities \| purge` |
 | `note_id`, `document_id` | `uuid` | nullable; `jobs_single_target` forbids both |
-| `status` | `text` | `queued \| running \| succeeded \| failed \| dead \| superseded` |
+| `status` | `text` | `pending \| queued \| running \| succeeded \| failed \| dead \| superseded` |
 | `priority` | `integer` | lower runs first |
 | `attempts`, `max_attempts` | `integer` | default 3 |
 | `run_after` | `timestamptz` | backoff target |
 | `locked_by`, `locked_at` | `text`, `timestamptz` | worker identity and lease |
-| `payload`, `last_error` | `jsonb`, `text` | |
+| `payload`, `error_message` | `jsonb`, `text` | |
+| `completed_at` | `timestamptz` | terminal-state timestamp |
 
 Indexes: partial `(priority, run_after) WHERE status = 'queued'` (the claim path) and partial
 `(locked_at) WHERE status = 'running'` (the stale-lock sweep).
@@ -448,7 +486,7 @@ public.hybrid_search(
 returns table (
   chunk_id uuid, source_kind text, note_id uuid, document_id uuid,
   source_title text, content text, heading_path text,
-  page_start integer, char_start integer, char_end integer,
+  page_number integer, char_start integer, char_end integer,
   vector_rank integer, keyword_rank integer, similarity double precision,
   fused_score double precision
 )

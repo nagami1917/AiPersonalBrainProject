@@ -46,6 +46,7 @@ def _summary_record(record: asyncpg.Record, tags: list[str] | None = None) -> Do
     return DocumentSummary(
         id=str(data["id"]),
         title=data["title"],
+        filename=data["filename"],
         status=data["status"],
         processing_stage=data.get("processing_stage"),
         collection_id=str(data["collection_id"]) if data.get("collection_id") else None,
@@ -99,11 +100,11 @@ async def create_upload_url(
         )
 
     document_id = str(uuid.uuid4())
-    storage_path = f"{ctx.id}/{document_id}/{_safe_filename(payload.filename)}"
-    upload_url, expires_at = storage_service.create_signed_upload_url(settings, storage_path)
+    file_path = f"{ctx.id}/{document_id}/{_safe_filename(payload.filename)}"
+    upload_url, expires_at = storage_service.create_signed_upload_url(settings, file_path)
     return UploadUrlResponse(
         document_id=document_id,
-        storage_path=storage_path,
+        file_path=file_path,
         upload_url=upload_url,
         expires_at=expires_at,
     )
@@ -153,8 +154,9 @@ async def confirm_upload(
             "collection_id": payload.collection_id,
             "uploaded_by": user.id,
             "title": payload.title,
+            "filename": payload.filename,
             "mime_type": _mime_from_name(object_name),
-            "storage_path": object_name,
+            "file_path": object_name,
             "file_size": size,
             "checksum_sha256": checksum,
             "status": "pending",
@@ -205,7 +207,7 @@ async def get_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> D
     return DocumentDetail(
         **_summary_record(record, tags).model_dump(),
         raw_text=data.get("raw_text"),
-        storage_path=data.get("storage_path"),
+        file_path=data.get("file_path"),
         error_message=data.get("error_message"),
         version=data.get("version", 1),
         embedding_model=data.get("embedding_model"),
@@ -289,10 +291,10 @@ async def list_chunks(
         ChunkPreview(
             id=str(r["id"]),
             kind="document",
-            ordinal=r["ordinal"],
+            chunk_index=r["chunk_index"],
             content=r["content"],
             heading_path=r["heading_path"],
-            page_start=r["page_start"],
+            page_number=r["page_number"],
             char_start=r["char_start"],
             char_end=r["char_end"],
             token_count=r["token_count"],

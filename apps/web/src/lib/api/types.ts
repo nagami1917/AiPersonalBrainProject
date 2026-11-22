@@ -37,7 +37,8 @@ export type NoteSummary = {
 };
 
 export type NoteDetail = NoteSummary & {
-  body: string | null;
+  content: string | null;
+  content_format: 'markdown' | 'plain';
   error_message: string | null;
   version: number;
   embedding_model: string | null;
@@ -48,6 +49,7 @@ export type DocumentSummary = {
   id: string;
   kind: 'document';
   title: string;
+  filename: string;
   status: DocumentStatus;
   processing_stage: ProcessingStage;
   collection_id: string | null;
@@ -62,7 +64,7 @@ export type DocumentSummary = {
 
 export type DocumentDetail = DocumentSummary & {
   raw_text: string | null;
-  storage_path: string | null;
+  file_path: string | null;
   error_message: string | null;
   version: number;
   embedding_model: string | null;
@@ -123,11 +125,12 @@ export type Job = {
   note_id: string | null;
   document_id: string | null;
   target_kind: SourceKind | null;
-  job_type: string;
+  type: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'dead' | 'superseded';
   attempts: number;
   max_attempts: number;
-  last_error: string | null;
+  error_message: string | null;
+  completed_at: string | null;
 };
 
 export type Meta = {

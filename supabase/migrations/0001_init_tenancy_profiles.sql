@@ -34,7 +34,11 @@ comment on function public.set_updated_at() is
 create table if not exists public.profiles (
   id                     uuid primary key references auth.users(id) on delete cascade,
   display_name           text,
+  avatar_url             text,
   timezone               text not null default 'UTC',
+  -- filled in by handle_new_user() below; the FK is added after workspaces
+  -- exists, because profiles is intentionally the first table in this file
+  default_workspace_id   uuid,
   default_embedding_model text not null default 'text-embedding-3-small',
   created_at             timestamptz not null default now(),
   updated_at             timestamptz not null default now()
@@ -67,6 +71,14 @@ drop trigger if exists trg_workspaces_updated_at on public.workspaces;
 create trigger trg_workspaces_updated_at
   before update on public.workspaces
   for each row execute function public.set_updated_at();
+
+-- Deferred from the profiles definition above (workspaces did not exist yet).
+-- SET NULL rather than CASCADE: losing a workspace must not delete the user.
+alter table public.profiles
+  drop constraint if exists profiles_default_workspace_id_fkey,
+  add constraint profiles_default_workspace_id_fkey
+    foreign key (default_workspace_id) references public.workspaces(id)
+    on delete set null;
 
 -- ---------------------------------------------------------------------------
 -- workspace_members — the single source of tenancy truth
@@ -222,6 +234,11 @@ begin
   insert into public.workspace_members (workspace_id, user_id, role)
   values (v_ws_id, new.id, 'owner')
   on conflict (workspace_id, user_id) do nothing;
+
+  -- Remember where to land on first load. A user with no default workspace
+  -- would have to guess, and "the workspace you were created with" is always
+  -- the right answer at signup.
+  update public.profiles set default_workspace_id = v_ws_id where id = new.id;
 
   return new;
 end;

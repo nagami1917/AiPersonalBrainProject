@@ -118,7 +118,7 @@ async def _persist_assistant_message(
         await conn.execute(
             """insert into public.message_sources
                  (workspace_id, message_id, chunk_id, source_kind, note_id, document_id,
-                  source_title, marker, quote, page, heading_path, score)
+                  source_title, marker, quote, page, heading_path, relevance_score)
                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
             workspace_id,
             message_id,
@@ -272,7 +272,7 @@ async def stream_answer(
                     "source_kind": s.source_kind,
                     "source_id": s.document_id,
                     "source_title": s.document_title,
-                    "page": s.page_start,
+                    "page": s.page_number,
                     "heading_path": s.heading_path,
                 }
                 for s in result.sources

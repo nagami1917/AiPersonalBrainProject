@@ -266,7 +266,7 @@ class TestWorkspaceIsolation:
         with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
             async with bob_conn.transaction():
                 await bob_conn.execute(
-                    """insert into public.notes (workspace_id, created_by, title, body)
+                    """insert into public.notes (workspace_id, created_by, title, content)
                        values ($1,$2,'smuggled','should never persist')""",
                     alice_ws,
                     BOB,

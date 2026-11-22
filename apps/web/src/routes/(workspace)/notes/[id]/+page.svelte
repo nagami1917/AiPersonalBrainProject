@@ -33,7 +33,7 @@
     try {
       note = await apiFetch<NoteDetail>(wsPath(`/notes/${id}`));
       title = note.title;
-      body = note.body ?? '';
+      body = note.content ?? '';
     } catch (err) {
       error =
         err instanceof NexusApiError
@@ -53,7 +53,7 @@
     try {
       await apiFetch(wsPath(`/notes/${note.id}`), {
         method: 'PATCH',
-        body: { title: title.trim(), body }
+        body: { title: title.trim(), content: body }
       });
       editing = false;
       await load();
@@ -148,7 +148,7 @@
       <textarea class="input min-h-72 font-mono text-[13px]" bind:value={body}></textarea>
     {:else}
       <article class="prose-nexus space-y-2 text-sm leading-relaxed text-ink-200">
-        {#each (note.body ?? '').split('\n\n') as paragraph}
+        {#each (note.content ?? '').split('\n\n') as paragraph}
           <p>{paragraph}</p>
         {/each}
       </article>
