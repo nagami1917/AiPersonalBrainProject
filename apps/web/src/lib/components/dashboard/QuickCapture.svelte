@@ -15,9 +15,9 @@
    *    no second upload path that could drift on validation.
    */
   import { apiFetch, NexusApiError } from '$lib/api/client';
-  import { uploadFile } from '$lib/api/supabase';
   import { wsPath } from '$lib/stores/workspace';
   import type { Meta, NoteSummary } from '$lib/api/types';
+  import FileUploader from '$lib/components/documents/FileUploader.svelte';
 
   let { oncaptured }: { oncaptured?: () => void } = $props();
 
@@ -29,7 +29,6 @@
   let busy = $state(false);
   let status = $state<{ kind: 'ok' | 'error'; message: string } | null>(null);
   let meta = $state<Meta | null>(null);
-  let fileInput = $state<HTMLInputElement | null>(null);
 
   $effect(() => {
     // The size/type limits are the API's, so they are fetched rather than
@@ -64,47 +63,6 @@
       };
     } finally {
       busy = false;
-    }
-  }
-
-  async function captureFile(files: FileList | null) {
-    const file = files?.[0];
-    if (!file || busy) return;
-    busy = true;
-    status = null;
-    try {
-      const { document_id, file_path } = await apiFetch<{ document_id: string; file_path: string }>(
-        wsPath('/documents/upload-url'),
-        {
-          method: 'POST',
-          body: {
-            filename: file.name,
-            mime_type: file.type || 'text/plain',
-            file_size: file.size
-          }
-        }
-      );
-      await uploadFile(file_path, file);
-      await apiFetch(wsPath('/documents'), {
-        method: 'POST',
-        body: {
-          document_id,
-          title: file.name.replace(/\.[^.]+$/, ''),
-          filename: file.name,
-          collection_id: null
-        }
-      });
-      status = { kind: 'ok', message: `Added ${file.name}.` };
-      oncaptured?.();
-    } catch (err) {
-      status = {
-        kind: 'error',
-        message:
-          err instanceof NexusApiError ? `${file.name}: ${err.message}` : 'Could not upload that file.'
-      };
-    } finally {
-      busy = false;
-      if (fileInput) fileInput.value = '';
     }
   }
 
@@ -161,21 +119,18 @@
       </button>
     </div>
   {:else}
-    <label
-      class="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-ink-700 px-4 py-8 text-center hover:border-accent-600"
-    >
-      <input
-        bind:this={fileInput}
-        type="file"
-        class="sr-only"
-        accept={meta?.supported_mime_types.join(',') ?? ''}
-        onchange={(e) => captureFile((e.currentTarget as HTMLInputElement).files)}
+    <!-- The same component the Documents page uses, so there is exactly one
+         upload path in the app: upload-url → Storage PUT → confirm. -->
+    <div class="mt-3">
+      <FileUploader
+        {meta}
+        compact
+        onuploaded={() => {
+          status = { kind: 'ok', message: 'Added to your knowledge base.' };
+          oncaptured?.();
+        }}
       />
-      <span class="text-xs text-ink-200">{busy ? 'Uploading…' : 'Choose a file'}</span>
-      <span class="mt-1 text-[10px] text-ink-500">
-        {meta ? meta.supported_mime_types.join(', ') : 'PDF, DOCX, TXT, Markdown'}
-      </span>
-    </label>
+    </div>
   {/if}
 
   {#if status}
