@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { apiFetch, NexusApiError } from '$lib/api/client';
+  import { wsPath, activeWorkspaceId, activeWorkspace } from '$lib/stores/workspace';
+  import { canWrite } from '$lib/api/types';
   import type { Collection, Tag } from '$lib/api/types';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
@@ -12,10 +14,11 @@
   let name = $state('');
 
   async function load() {
+    if (!$activeWorkspaceId) return;
     try {
       const [cols, tagList] = await Promise.all([
-        apiFetch<Collection[]>('/v1/collections'),
-        apiFetch<Tag[]>('/v1/tags')
+        apiFetch<Collection[]>(wsPath('/collections')),
+        apiFetch<Tag[]>(wsPath('/tags'))
       ]);
       collections = cols;
       tags = tagList;
@@ -34,7 +37,7 @@
   async function create() {
     if (!name.trim()) return;
     try {
-      await apiFetch('/v1/collections', { method: 'POST', body: { name: name.trim() } });
+      await apiFetch(wsPath('/collections'), { method: 'POST', body: { name: name.trim() } });
       name = '';
       await load();
     } catch (err) {

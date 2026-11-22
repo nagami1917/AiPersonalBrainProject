@@ -3,15 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 import asyncpg
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 
-from app.core.deps import current_user, user_db
+from app.core import tenancy
+from app.core.deps import UserConn, WorkspaceCtx
 from app.core.errors import Conflict, NotFound, Unprocessable
-from app.core.security import AuthUser
 
-router = APIRouter(prefix="/collections", tags=["collections"])
-tags_router = APIRouter(prefix="/tags", tags=["tags"])
+router = APIRouter(prefix="/workspaces/{workspace_id}/collections", tags=["collections"])
+tags_router = APIRouter(prefix="/workspaces/{workspace_id}/tags", tags=["tags"])
 
 MAX_DEPTH = 3
 
@@ -44,7 +44,7 @@ def _row(record: asyncpg.Record) -> dict[str, Any]:
     }
 
 
-async def _depth(conn: asyncpg.Connection, parent_id: str | None, user_id: str) -> int:
+async def _depth(conn: asyncpg.Connection, parent_id: str | None, workspace_id: str) -> int:
     """Walk to the root. Depth is capped here rather than in SQL so the error
     can explain itself."""
     depth = 1
@@ -54,54 +54,56 @@ async def _depth(conn: asyncpg.Connection, parent_id: str | None, user_id: str) 
         if depth > MAX_DEPTH + 1:
             raise Unprocessable(f"Collections cannot nest deeper than {MAX_DEPTH} levels")
         current = await conn.fetchval(
-            "select parent_id from public.collections where id=$1 and user_id=$2",
+            "select parent_id from public.collections where id=$1 and workspace_id=$2",
             current,
-            user_id,
+            workspace_id,
         )
     return depth
 
 
 @router.get("", response_model=list[dict[str, Any]])
-async def list_collections(
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
-) -> list[dict[str, Any]]:
+async def list_collections(ctx: WorkspaceCtx, conn: UserConn) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        """select c.*, (select count(*) from public.documents d
-                         where d.collection_id = c.id and d.deleted_at is null) as document_count
-           from public.collections c where c.user_id=$1
+        """select c.*,
+                  (select count(*) from public.notes n
+                    where n.collection_id = c.id and n.deleted_at is null) as note_count,
+                  (select count(*) from public.documents d
+                    where d.collection_id = c.id and d.deleted_at is null) as document_count
+           from public.collections c
+           where c.workspace_id=$1
            order by c.position, lower(c.name)""",
-        user.id,
+        ctx.id,
     )
     out = []
     for record in rows:
         item = _row(record)
+        item["note_count"] = record["note_count"]
         item["document_count"] = record["document_count"]
+        item["item_count"] = record["note_count"] + record["document_count"]
         out.append(item)
     return out
 
 
 @router.post("", response_model=dict, status_code=201)
 async def create_collection(
-    payload: CollectionCreate,
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
+    payload: CollectionCreate, ctx: WorkspaceCtx, conn: UserConn
 ) -> dict[str, Any]:
+    tenancy.require_write(ctx)
     if payload.parent_id:
         parent = await conn.fetchval(
-            "select id from public.collections where id=$1 and user_id=$2",
+            "select id from public.collections where id=$1 and workspace_id=$2",
             payload.parent_id,
-            user.id,
+            ctx.id,
         )
         if not parent:
             raise NotFound("Parent collection not found")
-    await _depth(conn, payload.parent_id, user.id)
+    await _depth(conn, payload.parent_id, ctx.id)
 
     try:
         record = await conn.fetchrow(
-            """insert into public.collections (user_id, parent_id, name, description, color)
+            """insert into public.collections (workspace_id, parent_id, name, description, color)
                values ($1,$2,$3,$4,$5) returning *""",
-            user.id,
+            ctx.id,
             payload.parent_id,
             payload.name.strip(),
             payload.description,
@@ -117,13 +119,11 @@ async def create_collection(
 
 @router.patch("/{collection_id}", response_model=dict)
 async def update_collection(
-    collection_id: str,
-    payload: CollectionUpdate,
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
+    collection_id: str, payload: CollectionUpdate, ctx: WorkspaceCtx, conn: UserConn
 ) -> dict[str, Any]:
+    tenancy.require_write(ctx)
     exists = await conn.fetchval(
-        "select id from public.collections where id=$1 and user_id=$2", collection_id, user.id
+        "select id from public.collections where id=$1 and workspace_id=$2", collection_id, ctx.id
     )
     if not exists:
         raise NotFound("Collection not found")
@@ -137,9 +137,9 @@ async def update_collection(
                description = coalesce($4, description),
                color = coalesce($5, color),
                parent_id = case when $6 then $7::uuid else parent_id end
-           where id=$1 and user_id=$2 returning *""",
+           where id=$1 and workspace_id=$2 returning *""",
         collection_id,
-        user.id,
+        ctx.id,
         payload.name.strip() if payload.name else None,
         payload.description,
         payload.color,
@@ -150,33 +150,37 @@ async def update_collection(
 
 
 @router.delete("/{collection_id}", status_code=204, response_class=Response, response_model=None)
-async def delete_collection(
-    collection_id: str,
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
-) -> None:
-    # Documents are NOT deleted with the folder — they fall back to uncategorized.
+async def delete_collection(collection_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Response:
+    tenancy.require_write(ctx)
+    # Notes and documents are NOT deleted with the folder — they fall back to
+    # uncategorized. Deleting a folder must never destroy knowledge.
     result = await conn.execute(
-        "delete from public.collections where id=$1 and user_id=$2", collection_id, user.id
+        "delete from public.collections where id=$1 and workspace_id=$2", collection_id, ctx.id
     )
-    if not result.endswith("1"):
+    if not str(result).endswith("1"):
         raise NotFound("Collection not found")
+    return Response(status_code=204)
 
 
 @tags_router.get("", response_model=list[dict[str, Any]])
-async def list_tags(
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
-) -> list[dict[str, Any]]:
+async def list_tags(ctx: WorkspaceCtx, conn: UserConn) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        """select t.id, t.name, count(dt.document_id) as document_count
+        """select t.id, t.name,
+                  (select count(*) from public.note_tags nt where nt.tag_id = t.id) as note_count,
+                  (select count(*) from public.document_tags dt where dt.tag_id = t.id)
+                    as document_count
            from public.tags t
-           left join public.document_tags dt on dt.tag_id = t.id
-           where t.user_id = $1
-           group by t.id, t.name
-           order by document_count desc, lower(t.name)""",
-        user.id,
+           where t.workspace_id = $1
+           order by note_count + document_count desc, lower(t.name)""",
+        ctx.id,
     )
     return [
-        {"id": str(r["id"]), "name": r["name"], "document_count": r["document_count"]} for r in rows
+        {
+            "id": str(r["id"]),
+            "name": r["name"],
+            "note_count": r["note_count"],
+            "document_count": r["document_count"],
+            "usage_count": r["note_count"] + r["document_count"],
+        }
+        for r in rows
     ]

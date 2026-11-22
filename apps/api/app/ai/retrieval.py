@@ -1,9 +1,12 @@
 """Retrieval: hybrid candidates → diversity → numbered sources.
 
 Search itself lives in SQL (`public.hybrid_search`). This module does the parts
-that need to be readable and testable in Python: MMR diversity, near-duplicate
-removal, the redundant-source rule, and the mapping to numbered Source objects
-that the grounding contract consumes.
+that need to be readable and testable in Python: near-duplicate removal, the
+per-source diversity cap, and the mapping to numbered Source objects that the
+grounding contract consumes.
+
+New with the workspace model: every hit carries `source_kind`, so a citation can
+say "note" or "document" without a second query.
 """
 
 from __future__ import annotations
@@ -11,16 +14,19 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from app.ai.grounding import Source
+
+SourceKind = Literal["note", "document"]
 
 
 @dataclass
 class Hit:
     chunk_id: str
-    document_id: str
-    document_title: str
+    source_kind: SourceKind
+    source_id: str  # note_id or document_id, whichever is set
+    source_title: str
     content: str
     heading_path: str | None
     page_start: int | None
@@ -39,10 +45,13 @@ class Hit:
 
 def row_to_hit(row: Any) -> Hit:
     record = dict(row)
+    kind = record["source_kind"]
+    source_id = record["note_id"] if kind == "note" else record["document_id"]
     return Hit(
         chunk_id=str(record["chunk_id"]),
-        document_id=str(record["document_id"]),
-        document_title=record["document_title"],
+        source_kind=kind,
+        source_id=str(source_id),
+        source_title=record["source_title"] or "Untitled",
         content=record["content"],
         heading_path=record.get("heading_path"),
         page_start=record.get("page_start"),
@@ -70,7 +79,8 @@ def dedupe(hits: Sequence[Hit], threshold: float = 0.85) -> list[Hit]:
     kept: list[Hit] = []
     for hit in hits:
         if any(
-            hit.document_id == other.document_id
+            hit.source_kind == other.source_kind
+            and hit.source_id == other.source_id
             and _jaccard(hit.content, other.content) >= threshold
             for other in kept
         ):
@@ -79,25 +89,29 @@ def dedupe(hits: Sequence[Hit], threshold: float = 0.85) -> list[Hit]:
     return kept
 
 
-def limit_per_document(hits: Sequence[Hit], max_share: float = 0.6) -> list[Hit]:
-    """No single document may dominate the context unless it is all we have."""
+def limit_per_source(hits: Sequence[Hit], max_share: float = 0.6) -> list[Hit]:
+    """No single note/document may dominate the context unless it is all we have.
+
+    Applied across the union of both source kinds, keyed on (kind, id), because a
+    long document crowding out a better note is the same failure either way.
+    """
     if not hits:
         return []
-    distinct_docs = {h.document_id for h in hits}
-    if len(distinct_docs) <= 1:
+    distinct = {(h.source_kind, h.source_id) for h in hits}
+    if len(distinct) <= 1:
         return list(hits)
 
     cap = max(1, math.ceil(len(hits) * max_share))
-    counts: dict[str, int] = {}
+    counts: dict[tuple[str, str], int] = {}
     kept: list[Hit] = []
     overflow: list[Hit] = []
     for hit in hits:
-        if counts.get(hit.document_id, 0) < cap:
-            counts[hit.document_id] = counts.get(hit.document_id, 0) + 1
+        key = (hit.source_kind, hit.source_id)
+        if counts.get(key, 0) < cap:
+            counts[key] = counts.get(key, 0) + 1
             kept.append(hit)
         else:
             overflow.append(hit)
-    # Keep overflow in reserve rather than discarding evidence outright.
     return kept + overflow[: max(0, len(overflow) - len(kept))]
 
 
@@ -107,14 +121,15 @@ def to_sources(hits: Sequence[Hit]) -> list[Source]:
         Source(
             marker=i,
             chunk_id=hit.chunk_id,
-            document_id=hit.document_id,
-            document_title=hit.document_title,
+            document_id=hit.source_id,
+            document_title=hit.source_title,
             content=hit.content,
             heading_path=hit.heading_path,
             page_start=hit.page_start,
             char_start=hit.char_start,
             char_end=hit.char_end,
             score=hit.fused_score,
+            source_kind=hit.source_kind,
         )
         for i, hit in enumerate(hits, start=1)
     ]
@@ -123,9 +138,9 @@ def to_sources(hits: Sequence[Hit]) -> list[Source]:
 def normalize_fused_scores(hits: Sequence[Hit]) -> list[float]:
     """Map raw RRF values (~0.01–0.03) to a 0–1 display range.
 
-    RRF is a ranking signal, not a probability. Normalizing by the best hit
-    gives users a meaningful "how much better than the rest" bar without
-    implying a confidence we cannot compute.
+    RRF is a ranking signal, not a probability. Normalizing by the best hit gives
+    users a meaningful "how much better than the rest" bar without implying a
+    confidence we cannot compute.
     """
     if not hits:
         return []

@@ -4,11 +4,15 @@ Deliberately two clients (ARCHITECTURE.md §3):
 
   db_user   builds a connection whose `role` and `request.jwt.claim.sub` are set
             from the caller's token, so Postgres RLS applies to everything the
-            API does on the user's behalf. A forgotten `WHERE user_id` in Python
+            API does on the user's behalf. A forgotten workspace filter in Python
             cannot cross tenants — the database refuses.
   db_admin  service role, used only for job enqueueing and worker operations.
 
 Ownership is therefore checked twice, by two independent mechanisms.
+
+Note that identity and tenancy are different things: the token establishes WHO
+is calling, and workspace membership (resolved in Postgres) establishes WHAT
+they may touch. The API never derives authorisation from the token alone.
 """
 
 from __future__ import annotations
@@ -56,7 +60,8 @@ def decode_token(token: str, settings: Settings) -> AuthUser:
 async def user_connection(conn: Any, user: AuthUser) -> None:
     """Bind an asyncpg connection to the caller's identity for RLS.
 
-    `set local` requires a transaction; callers wrap their work in one.
+    `set_config(..., true)` is transaction-scoped; callers wrap their work in a
+    transaction (see core/deps.user_db).
     """
     await conn.execute("select set_config('role', $1, true)", "authenticated")
     await conn.execute("select set_config('request.jwt.claim.sub', $1, true)", user.id)

@@ -44,7 +44,13 @@ REFUSAL_TEMPLATE = (
 
 @dataclass
 class Source:
-    """One retrievable passage, as presented to the model and later cited."""
+    """One retrievable passage, as presented to the model and later cited.
+
+    `document_id` is the *source* id and is populated for both kinds — notes and
+    documents are separate tables, so `source_kind` says which one the id
+    belongs to. Keeping the field name stable means the citation contract and
+    the API schema do not change shape with the storage model.
+    """
 
     marker: int
     chunk_id: str
@@ -56,9 +62,14 @@ class Source:
     char_start: int | None = None
     char_end: int | None = None
     score: float = 0.0
+    source_kind: str = "document"
 
     def to_context_block(self) -> str:
-        attrs = [f'id="{self.marker}"', f'title="{_escape_attr(self.document_title)}"']
+        attrs = [
+            f'id="{self.marker}"',
+            f'kind="{self.source_kind}"',
+            f'title="{_escape_attr(self.document_title)}"',
+        ]
         if self.page_start:
             attrs.append(f'page="{self.page_start}"')
         if self.heading_path:
@@ -80,6 +91,7 @@ class Citation:
     page: int | None
     heading_path: str | None
     score: float
+    source_kind: str = "document"
 
 
 @dataclass
@@ -148,6 +160,7 @@ def resolve_citations(
                 page=source.page_start,
                 heading_path=source.heading_path,
                 score=round(source.score, 4),
+                source_kind=source.source_kind,
             )
         )
 

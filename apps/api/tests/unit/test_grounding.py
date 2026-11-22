@@ -89,7 +89,7 @@ class TestRefusalDecision:
 class TestContextAssembly:
     def test_sources_are_numbered_and_delimited(self):
         context = build_context(make_sources(2))
-        assert '<source id="1" title="Title 1" page="1">' in context
+        assert '<source id="1" kind="document" title="Title 1" page="1">' in context
         assert '<source id="2"' in context
         assert context.count("</source>") == 2
 

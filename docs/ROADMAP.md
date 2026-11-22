@@ -48,7 +48,7 @@ This milestone is deliberately before any UI. The tenant boundary is the one thi
 **Done when:** asking a question returns an answer whose every citation points at a real chunk, and an unanswerable question is refused rather than answered.
 
 - `/v1/search` (hybrid, RRF, `matched_arm`)
-- `/v1/chat` + `/v1/chat/stream`: retrieval → assembly → generation → citation resolution → persistence
+- `/v1/workspaces/{id}/chat` + `/chat/stream`: retrieval → assembly → generation → citation resolution → persistence
 - Score floor / ungrounded path; fabricated-marker stripping
 - Eval harness with answerable / unanswerable / adversarial sets, run in CI
 - Tests: no-LLM-call assertion on the refusal path; cross-tenant retrieval isolation
@@ -96,8 +96,9 @@ If M3 slips, everything else waits. A beautiful app over an ungrounded model is 
 
 | Feature | Trigger to revisit |
 |---|---|
-| Sharing / collaborative collections | First explicit request; needs a permissions model beyond owner-only |
-| Workspaces / org tenancy | First team user — schema already carries `user_id`, so this is an additive `workspace_id` migration |
+| Sharing / collaborative collections | First explicit request. The data model already supports it: members with `viewer`/`member`/`admin` roles exist, so this is UI and invitation flow, not a migration |
+| Email invitations | First time someone needs to bring in a colleague; requires a token table, expiry and delivery |
+| Per-workspace billing / seats | First paid team. `usage_events` already records model spend per workspace |
 | OCR for scanned PDFs | First user with image-only PDFs |
 | Audio/video ingestion | Requested; needs transcription pipeline |
 | Browser extension / mobile capture | Capture friction shows up in usage data |

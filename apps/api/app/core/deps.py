@@ -1,13 +1,21 @@
-"""Request dependencies: auth, database, and the two-client split."""
+"""Request dependencies: auth, database, workspace context, and providers.
+
+Workspace context is resolved here, once, so no route has to decide which
+workspace it is operating on. Every tenant-scoped query then takes an explicit
+`workspace_id` — the Python-side half of the two-mechanism isolation (the other
+half is RLS).
+"""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Annotated
 
 import asyncpg
-from fastapi import Depends, Request
+from fastapi import Depends, Path, Request
 
 from app.ai.providers import LLM, Embedder
+from app.core import tenancy
 from app.core.config import Settings, get_settings
 from app.core.db import get_pool
 from app.core.errors import Unauthorized
@@ -56,6 +64,36 @@ async def user_db(
 def admin_pool_dep(pool: asyncpg.Pool = Depends(db)) -> asyncpg.Pool:
     """Service-role access. Restricted by convention to enqueueing and workers."""
     return pool
+
+
+# ---------------------------------------------------------------------------
+# Workspace context
+#
+# Two forms, because they answer different questions:
+#
+#   workspace_path   /v1/workspaces/{workspace_id}/...  → explicit, used by all
+#                    resource routes. Must be a member or it is a 404.
+#   active_workspace the caller's default workspace, used by routes that are
+#                    inherently personal (e.g. "which workspace am I in?").
+# ---------------------------------------------------------------------------
+
+
+async def workspace_path(
+    workspace_id: Annotated[str, Path(description="Workspace id")],
+    user: AuthUser = Depends(current_user),
+    conn: asyncpg.Connection = Depends(user_db),
+) -> tenancy.WorkspaceContext:
+    """Resolve and authorise the workspace named in the URL.
+
+    Non-membership returns 404, never 403: the API does not confirm that someone
+    else's workspace exists.
+    """
+    return await tenancy.resolve_workspace(conn, user_id=user.id, workspace_id=workspace_id)
+
+
+CurrentUser = Annotated[AuthUser, Depends(current_user)]
+WorkspaceCtx = Annotated[tenancy.WorkspaceContext, Depends(workspace_path)]
+UserConn = Annotated[asyncpg.Connection, Depends(user_db)]
 
 
 def get_embedder(settings: Settings = Depends(get_settings)) -> Embedder:

@@ -55,7 +55,17 @@ make dev                      # API :8000 + web :5173
 
 ### What the seed gives you
 
-Two users (`alice@nexus.local`, `bob@nexus.local`, password `password123`) with **near-identical vocabulary** about deployment secrets, deliberately. Seed embeddings are deterministic pseudo-vectors, not model output — enough to exercise the vector arm offline. If Bob's text ever appears in Alice's results, isolation is broken and you can see it by eye.
+Three users, each with their own **personal workspace**:
+
+| User | Password | Setup |
+|---|---|---|
+| `alice@nexus.local` | `password123` | Collection, two notes, one PDF record with chunks, a tag, a cited conversation, a queued job |
+| `bob@nexus.local` | `password123` | One note whose wording is **near-identical** to Alice's, in a separate workspace |
+| `carol@nexus.local` | `password123` | Invited into Alice's workspace as a **viewer** |
+
+Bob's vocabulary is deliberately close to Alice's about deployment secrets. If his note ever appears in Alice's results, isolation is broken and you can see it by eye rather than having to write a test. Carol exists to exercise the role ladder: she can read Alice's workspace and cannot write to it.
+
+Seed embeddings are deterministic pseudo-vectors (`pg_temp.pseudo_embedding`), not model output — enough to exercise the vector arm offline. `seed.sql` is idempotent: running it twice leaves identical data, which is what `make test-db` relies on.
 
 ### Commands
 
@@ -74,7 +84,24 @@ Two users (`alice@nexus.local`, `bob@nexus.local`, password `password123`) with 
 ```bash
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres make test-db
 ```
-These assert the things that must never regress: cross-tenant reads return zero rows, the LLM is not called when retrieval is empty, and a fabricated marker persists no citation.
+
+These assert the things that must never regress:
+
+* a non-member's workspace id is a `404` at the route and zero rows at the SQL layer;
+* a `viewer` can read but every write policy refuses the statement;
+* the LLM is not called when retrieval is empty;
+* a fabricated citation marker persists no `message_sources` row;
+* a citation's `source_kind` matches the parent column it populated.
+
+The raw-SQL isolation suite is separate, and readable as a checklist:
+
+```bash
+psql "$DATABASE_URL" -f supabase/tests/tenancy.sql
+```
+
+It uses its own `aaaa…`/`bbbb…`/`cccc…` UUID space and is idempotent, so it is safe to run before
+or after `seed.sql`. Every line says what it checked; a `SECURITY FAILURE` notice means a policy
+has been loosened.
 
 ---
 

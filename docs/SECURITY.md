@@ -10,10 +10,10 @@ The threat model for a personal knowledge tool is dominated by one thing: **your
 
 | Boundary | Enforced by | Never trusted |
 |---|---|---|
-| Browser → API | Supabase JWT verified on every request | Any `user_id` in a request body |
-| API → Postgres | RLS, with the API running as the caller's role | Application `WHERE` clauses alone |
+| Browser → API | Supabase JWT verified on every request | Any `workspace_id` or `user_id` in a request body |
+| API → Postgres | RLS membership policies, with the API running as the caller's role | Application `WHERE` clauses alone |
 | Worker → Postgres | service role, deliberately | Nothing — the worker is system code |
-| Browser → Storage | Storage path policies (`auth.uid()` = first path segment) | Client-supplied paths |
+| Browser → Storage | Storage path policies (`{workspace_id}/…`) | Client-supplied paths |
 | Retrieved text → LLM | Delimited `<source>` blocks + explicit non-instruction framing | Model compliance |
 
 ---
@@ -39,23 +39,62 @@ Enforced structurally in `apps/web/src/lib/utils/env.ts`: only `PUBLIC_*` names 
 
 Three independent mechanisms, so any one of them failing is not a breach:
 
-**1. JWT-derived identity.** `current_user` decodes the bearer token and sets `user_id` from the `sub` claim. Request bodies cannot influence it.
+Identity and authorisation are deliberately separate: the token says **who** is calling, and
+workspace membership — resolved in Postgres — says **what** they may touch. A valid token is not a
+permission.
 
-**2. RLS on every user-scoped table.** Four policies per table, all keyed on `auth.uid()`. The API's `user_db` dependency opens a transaction and sets `role = authenticated` plus the JWT claim **on the connection**, so Postgres applies policy to everything the request does — including the retrieval SQL function, which runs `SECURITY INVOKER` and takes `p_user_id` explicitly.
+**1. JWT-derived identity.** `current_user` decodes the bearer token and takes `user_id` from the
+`sub` claim. Request bodies cannot influence it.
 
-**3. Explicit filters.** Queries pass `user_id` too. Redundant on purpose.
+**2. Workspace resolution at the route boundary.** Every tenant route is
+`/v1/workspaces/{workspace_id}/…`. `resolve_workspace()` joins `workspace_members` for the caller;
+a non-member gets `404`, never `403`, because a `403` would confirm the workspace exists.
 
-Verified by `apps/api/tests/db/test_chat_grounding_e2e.py` and, during development, directly against Postgres as a non-superuser role:
+**3. RLS on all 18 tables.** Policies are membership-based (`is_workspace_member`,
+`can_write_workspace`, `can_manage_workspace`), not owner-based. `user_db` opens a transaction and
+sets `role = authenticated` plus the JWT claim **on the connection**, so Postgres applies policy to
+everything the request does — including `hybrid_search`, which runs `SECURITY INVOKER` and takes
+`p_workspace_id` explicitly.
+
+**4. Explicit filters.** Queries pass `workspace_id` too. Redundant on purpose.
+
+Verified against Postgres as a non-superuser role (`supabase/tests/tenancy.sql`) and over HTTP
+(`apps/api/tests/db/test_api_workspaces.py`):
 
 ```
--- as bob
-select count(*) from public.documents;                            → 1  (his own)
-select count(*) from public.documents where id = '<alice doc>';   → 0
-update public.documents set title='pwned' where id='<alice doc>'; → UPDATE 0
-insert ... user_id = '<alice>';  → rejected: violates row-level security policy
+-- as carol, a viewer in alice's workspace and a stranger to bob's
+select count(*) from public.notes where workspace_id = '<alice ws>';   → readable (member)
+insert into public.notes (workspace_id, ...) values ('<alice ws>');    → rejected: RLS policy
+update public.notes set title='pwned' where workspace_id='<alice ws>'; → UPDATE 0
+insert into public.workspace_members ...;                              → rejected: RLS policy
+GET /v1/workspaces/<bob ws>/notes                                      → 404
+POST public.hybrid_search(p_workspace_id => '<alice ws>')              → 0 rows
 ```
 
-`404`, not `403`, for resources the caller does not own: the API does not confirm that someone else's document exists.
+`404`, not `403`, for resources the caller cannot reach: the API does not confirm that someone
+else's workspace exists.
+
+**5. Privileged SQL functions check their own caller.** `enqueue_job()` and the role helpers are
+`SECURITY DEFINER` (so they can bypass RLS to do their job) and therefore verify
+`can_write_workspace()` / membership internally. `EXECUTE` is not a write grant; without the guard
+it would be one.
+
+### 3.1 Roles
+
+| Role | Read | Write | Manage members |
+|---|---|---|---|
+| owner | ✓ | ✓ | ✓ |
+| admin | ✓ | ✓ | ✓ |
+| member | ✓ | ✓ | ✗ |
+| viewer | ✓ | ✗ | ✗ |
+
+`owner` is exactly one per workspace, enforced by a partial unique index. A `viewer` is the row
+that makes sharing safe: read access to a colleague's workspace without the ability to modify it —
+enforced in the database, not by hiding buttons.
+
+**6. Storage is path-scoped to the workspace.** Object paths begin with the workspace id and the
+policies parse that segment, so a signed upload URL cannot be minted for a foreign workspace, and a
+signed download URL cannot be used to read one.
 
 ---
 
@@ -79,7 +118,7 @@ This is mitigation, not immunity. It is tested with an adversarial eval set rath
 |---|---|
 | Type allowlist | `MAX`/mime checked at `POST /documents/upload-url` before a path exists |
 | Size limit | 50 MB at request time **and** on the bucket (`file_size_limit`) |
-| Path traversal | Filenames sanitized to `[A-Za-z0-9._-]`; path is server-generated `{user_id}/{document_id}/{name}` |
+| Path traversal | Filenames sanitized to `[A-Za-z0-9._-]`; path is server-generated `{workspace_id}/{document_id}/{name}` |
 | Private bucket | No public read; access via signed URLs only (upload 5 min, download 60 s) |
 | Storage RLS | `(storage.foldername(name))[1] = auth.uid()::text` on select/insert/update/delete |
 | Byte proxying | None — the browser PUTs directly; the API never handles file bytes |

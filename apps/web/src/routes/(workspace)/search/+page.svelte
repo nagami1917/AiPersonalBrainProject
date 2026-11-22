@@ -5,6 +5,8 @@
    */
   import { apiFetch, NexusApiError } from '$lib/api/client';
   import type { SearchResult } from '$lib/api/types';
+  import { sourceHref, sourceLabel } from '$lib/utils/sources';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
 
   let query = $state('');
@@ -16,14 +18,14 @@
   let error = $state<{ message: string; code?: string } | null>(null);
 
   async function search() {
-    if (!query.trim() || busy) return;
+    if (!query.trim() || busy || !$activeWorkspaceId) return;
     busy = true;
     error = null;
     try {
       const response = await apiFetch<{
         results: SearchResult[];
         total_candidates: { vector: number; keyword: number };
-      }>('/v1/search', { method: 'POST', body: { query: query.trim(), mode, limit: 20 } });
+      }>(wsPath('/search'), { method: 'POST', body: { query: query.trim(), mode, limit: 20 } });
       results = response.results;
       candidates = response.total_candidates;
       searched = true;
@@ -95,12 +97,15 @@
         <li class="card px-4 py-3">
           <div class="flex items-start justify-between gap-3">
             <a
-              href="/documents/{result.document_id}"
+              href={sourceHref(result.source_kind, result.source_id)}
               class="text-sm font-medium text-ink-100 hover:text-accent-400"
             >
-              {result.document_title}
+              {result.source_title}
             </a>
             <div class="flex shrink-0 items-center gap-2 text-[10px] uppercase tracking-wide">
+              <span class="rounded bg-ink-800 px-1.5 py-0.5 text-ink-400">
+                {sourceLabel(result.source_kind)}
+              </span>
               <span class="rounded bg-ink-800 px-1.5 py-0.5 text-ink-400">
                 {armLabel[result.matched_arm] ?? result.matched_arm}
               </span>

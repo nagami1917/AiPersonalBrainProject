@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { apiFetch, NexusApiError } from '$lib/api/client';
-  import type { DocumentSummary } from '$lib/api/types';
+  import type { NoteSummary } from '$lib/api/types';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import StatusPill from '$lib/components/StatusPill.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import { relativeTime } from '$lib/utils/format';
 
-  let notes = $state<DocumentSummary[]>([]);
+  let notes = $state<NoteSummary[]>([]);
   let loading = $state(true);
   let error = $state<{ message: string; code?: string } | null>(null);
   let creating = $state(false);
@@ -15,8 +16,9 @@
   let body = $state('');
 
   async function load() {
+    if (!$activeWorkspaceId) return;
     try {
-      const response = await apiFetch<{ items: DocumentSummary[] }>('/v1/notes');
+      const response = await apiFetch<{ items: NoteSummary[] }>(wsPath('/notes'));
       notes = response.items;
     } catch (err) {
       error =
@@ -34,7 +36,7 @@
     if (!title.trim() || !body.trim()) return;
     error = null;
     try {
-      await apiFetch('/v1/notes', {
+      await apiFetch(wsPath('/notes'), {
         method: 'POST',
         body: { title: title.trim(), body: body.trim() }
       });
@@ -106,7 +108,7 @@
       {#each notes as note (note.id)}
         <li class="flex items-center justify-between gap-4 px-4 py-3">
           <div class="min-w-0">
-            <a href="/documents/{note.id}" class="block truncate text-sm text-ink-100 hover:text-accent-400">
+            <a href="/notes/{note.id}" class="block truncate text-sm text-ink-100 hover:text-accent-400">
               {note.title}
             </a>
             <p class="text-[11px] text-ink-500">updated {relativeTime(note.updated_at)}</p>

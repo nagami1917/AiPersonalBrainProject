@@ -2,7 +2,11 @@
 
 At-least-once delivery via `FOR UPDATE SKIP LOCKED`, exponential backoff into
 `run_after`, dead-lettering after `max_attempts`, and a staleness sweep so a
-crash mid-job recovers instead of stranding a document in `processing` forever.
+crash mid-job recovers instead of stranding a source in `processing` forever.
+
+A job targets at most one of a note or a document; the CHECK in migration 0006
+enforces that, so `Job` can expose a single `target` rather than a tuple of
+optionals.
 """
 
 from __future__ import annotations
@@ -18,24 +22,25 @@ import asyncpg
 log = logging.getLogger(__name__)
 
 CLAIM_SQL = """
-update public.jobs j
+update public.processing_jobs j
 set status = 'running',
     locked_by = $1,
     locked_at = now(),
     attempts = j.attempts + 1
 where j.id = (
-  select id from public.jobs
+  select id from public.processing_jobs
   where status = 'queued'
     and run_after <= now()
   order by priority, run_after
   for update skip locked
   limit 1
 )
-returning j.id, j.user_id, j.document_id, j.job_type, j.attempts, j.max_attempts, j.payload
+returning j.id, j.workspace_id, j.note_id, j.document_id, j.job_type,
+          j.attempts, j.max_attempts, j.payload
 """
 
 SWEEP_SQL = """
-update public.jobs
+update public.processing_jobs
 set status = 'queued', locked_by = null, locked_at = null
 where status = 'running'
   and locked_at < now() - make_interval(secs => $1)
@@ -46,12 +51,22 @@ returning id
 @dataclass
 class Job:
     id: str
-    user_id: str
+    workspace_id: str
+    note_id: str | None
     document_id: str | None
     job_type: str
     attempts: int
     max_attempts: int
     payload: dict[str, Any]
+
+    @property
+    def target(self) -> tuple[str, str] | None:
+        """(kind, id) for the content this job operates on."""
+        if self.note_id:
+            return ("note", self.note_id)
+        if self.document_id:
+            return ("document", self.document_id)
+        return None
 
     @classmethod
     def from_row(cls, row: Any) -> Job:
@@ -63,7 +78,8 @@ class Job:
             payload = json.loads(payload)
         return cls(
             id=str(record["id"]),
-            user_id=str(record["user_id"]),
+            workspace_id=str(record["workspace_id"]),
+            note_id=str(record["note_id"]) if record["note_id"] else None,
             document_id=str(record["document_id"]) if record["document_id"] else None,
             job_type=record["job_type"],
             attempts=record["attempts"],
@@ -83,7 +99,8 @@ async def claim_job(conn: asyncpg.Connection) -> Job | None:
 
 async def mark_succeeded(conn: asyncpg.Connection, job_id: str) -> None:
     await conn.execute(
-        "update public.jobs set status='succeeded', locked_by=null, locked_at=null where id=$1",
+        "update public.processing_jobs set status='succeeded', locked_by=null, locked_at=null "
+        "where id=$1",
         job_id,
     )
 
@@ -92,7 +109,7 @@ async def mark_failed(conn: asyncpg.Connection, job: Job, error: str) -> None:
     """Backoff or dead-letter. Never leaves a job silently stuck."""
     if job.attempts >= job.max_attempts:
         await conn.execute(
-            """update public.jobs
+            """update public.processing_jobs
                set status='dead', locked_by=null, locked_at=null, last_error=$2
                where id=$1""",
             job.id,
@@ -103,7 +120,7 @@ async def mark_failed(conn: asyncpg.Connection, job: Job, error: str) -> None:
 
     delay = min(60 * (2 ** (job.attempts - 1)), 3600)
     await conn.execute(
-        """update public.jobs
+        """update public.processing_jobs
            set status='queued', locked_by=null, locked_at=null,
                last_error=$2, run_after=now() + make_interval(secs => $3)
            where id=$1""",
@@ -122,7 +139,8 @@ async def requeue_stale(conn: asyncpg.Connection, stale_after_seconds: int) -> i
 
 
 async def mark_superseded(conn: asyncpg.Connection, job_id: str) -> None:
-    """A newer version of the document already produced results."""
+    """A newer version of the source already produced results."""
     await conn.execute(
-        "update public.jobs set status='superseded', locked_by=null where id=$1", job_id
+        "update public.processing_jobs set status='superseded', locked_by=null where id=$1",
+        job_id,
     )

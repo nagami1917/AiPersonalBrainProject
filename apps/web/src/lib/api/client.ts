@@ -76,10 +76,12 @@ export type ChatEvent =
   | { type: 'done'; message_id: string; conversation_id: string; latency_ms: number }
   | { type: 'error'; code: string; message: string };
 
+/** Every source names the table its id belongs to, so links can be correct. */
 export type SourcePreview = {
   marker: number;
-  document_id: string;
-  document_title: string;
+  source_kind: 'note' | 'document';
+  source_id: string;
+  source_title: string;
   page: number | null;
   heading_path: string | null;
 };
@@ -87,8 +89,9 @@ export type SourcePreview = {
 export type Citation = {
   marker: number;
   chunk_id: string;
-  document_id: string;
-  document_title: string;
+  source_kind: 'note' | 'document';
+  source_id: string;
+  source_title: string;
   quote: string;
   page: number | null;
   heading_path: string | null;
@@ -96,12 +99,13 @@ export type Citation = {
 };
 
 export async function streamChat(
+  workspaceId: string,
   body: Record<string, unknown>,
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const token = await accessToken();
-  const response = await fetch(`${env.apiBaseUrl}/v1/chat/stream`, {
+  const response = await fetch(`${env.apiBaseUrl}/v1/workspaces/${workspaceId}/chat/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

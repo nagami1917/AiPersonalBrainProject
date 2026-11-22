@@ -1,30 +1,28 @@
 from __future__ import annotations
 
-import asyncpg
 from fastapi import APIRouter, Depends
 
 from app.ai.providers import Embedder
 from app.ai.retrieval import normalize_fused_scores
 from app.core.config import Settings, get_settings
-from app.core.deps import current_user, get_embedder, user_db
-from app.core.security import AuthUser
+from app.core.deps import UserConn, WorkspaceCtx, get_embedder
 from app.schemas.chat import SearchRequest, SearchResponse, SearchResult
 from app.services.retrieval_service import retrieve
 
-router = APIRouter(prefix="/search", tags=["search"])
+router = APIRouter(prefix="/workspaces/{workspace_id}/search", tags=["search"])
 
 
 @router.post("", response_model=SearchResponse)
 async def search(
     payload: SearchRequest,
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
+    ctx: WorkspaceCtx,
+    conn: UserConn,
     settings: Settings = Depends(get_settings),
     embedder: Embedder = Depends(get_embedder),
 ) -> SearchResponse:
     result = await retrieve(
         conn,
-        user_id=user.id,
+        workspace_id=ctx.id,
         query=payload.query,
         embedder=embedder,
         settings=settings,
@@ -39,8 +37,9 @@ async def search(
     display_scores = normalize_fused_scores(result.hits)
     results = [
         SearchResult(
-            document_id=hit.document_id,
-            document_title=hit.document_title,
+            source_kind=hit.source_kind,
+            source_id=hit.source_id,
+            source_title=hit.source_title,
             chunk_id=hit.chunk_id,
             snippet=hit.content[:600],
             heading_path=hit.heading_path,
