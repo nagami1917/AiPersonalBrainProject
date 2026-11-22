@@ -7,11 +7,15 @@ from pydantic import BaseModel, Field
 
 
 class SearchFilters(BaseModel):
+    """Filters applied inside the retrieval SQL, so both arms see the same set."""
+
     collection_id: str | None = None
     tag: str | None = None
     created_after: datetime | None = None
     created_before: datetime | None = None
-    document_ids: list[str] | None = None
+    # restrict to specific notes/documents (ids of either kind)
+    source_ids: list[str] | None = None
+    kind: Literal["note", "document"] | None = None
 
 
 class SearchRequest(BaseModel):
@@ -23,8 +27,9 @@ class SearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
-    document_id: str
-    document_title: str
+    source_kind: Literal["note", "document"]
+    source_id: str
+    source_title: str
     chunk_id: str
     snippet: str
     heading_path: str | None = None
@@ -53,8 +58,9 @@ class ChatRequest(BaseModel):
 class CitationOut(BaseModel):
     marker: int
     chunk_id: str
-    document_id: str
-    document_title: str
+    source_kind: Literal["note", "document"]
+    source_id: str
+    source_title: str
     quote: str
     page: int | None = None
     heading_path: str | None = None

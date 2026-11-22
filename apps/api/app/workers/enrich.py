@@ -1,8 +1,11 @@
 """Summary and entity extraction jobs.
 
-Both are best-effort by design: a failure here degrades the graph and the
-document list, but must never block retrieval (a document is already `ready`
-with searchable chunks by the time these run).
+Both are best-effort by design: a failure here degrades the graph and the list
+view, but must never block retrieval — the source is already `ready` with
+searchable chunks by the time these run.
+
+Works on either parent. The chunks table gives us the text and the entity links
+regardless of which table the source lives in.
 """
 
 from __future__ import annotations
@@ -23,29 +26,50 @@ VALID_TYPES = {"person", "organization", "project", "concept", "place", "event",
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
 
+def _table(kind: str) -> str:
+    return "notes" if kind == "note" else "documents"
+
+
+def _text_column(kind: str) -> str:
+    return "body" if kind == "note" else "raw_text"
+
+
+async def _load_source(
+    conn: asyncpg.Connection, *, kind: str, source_id: str
+) -> asyncpg.Record | None:
+    return await conn.fetchrow(
+        f"""select id, workspace_id, version, {_text_column(kind)} as text
+            from public.{_table(kind)} where id=$1""",
+        source_id,
+    )
+
+
 async def run_summary(
-    conn: asyncpg.Connection, *, document_id: str, payload: dict[str, Any], llm: LLM
+    conn: asyncpg.Connection,
+    *,
+    kind: str,
+    source_id: str,
+    payload: dict[str, Any],
+    llm: LLM,
 ) -> None:
     version = int(payload.get("version", 1))
-    row = await conn.fetchrow(
-        "select title, raw_text, version from public.documents where id=$1", document_id
-    )
-    if not row or not row["raw_text"]:
+    row = await _load_source(conn, kind=kind, source_id=source_id)
+    if not row or not row["text"]:
         return
-    if row["version"] != version:
-        log.info("summary superseded for doc=%s", document_id)
+    if int(row["version"]) != version:
+        log.info("summary superseded for %s=%s", kind, source_id)
         return
 
     summary = (
         await llm.complete(
             "You summarize documents factually and tersely.",
-            build_summary_prompt(row["raw_text"]),
+            build_summary_prompt(row["text"]),
         )
     ).strip()
 
     await conn.execute(
-        "update public.documents set summary=$2 where id=$1 and version=$3",
-        document_id,
+        f"update public.{_table(kind)} set summary=$2 where id=$1 and version=$3",
+        source_id,
         summary[:2000],
         version,
     )
@@ -54,30 +78,32 @@ async def run_summary(
 async def run_entities(
     conn: asyncpg.Connection,
     *,
-    user_id: str,
-    document_id: str,
+    kind: str,
+    source_id: str,
     payload: dict[str, Any],
     llm: LLM,
 ) -> None:
     version = int(payload.get("version", 1))
-    row = await conn.fetchrow(
-        "select raw_text, version from public.documents where id=$1", document_id
-    )
-    if not row or not row["raw_text"] or row["version"] != version:
+    row = await _load_source(conn, kind=kind, source_id=source_id)
+    if not row or not row["text"] or int(row["version"]) != version:
         return
+
+    workspace_id = str(row["workspace_id"])
 
     raw = await llm.complete(
         "You extract structured data. You reply with JSON only.",
-        build_entity_prompt(row["raw_text"]),
+        build_entity_prompt(row["text"]),
     )
     parsed = _parse_json(raw)
     if not parsed:
-        log.info("entity extraction returned no parsable JSON for doc=%s", document_id)
+        log.info("entity extraction returned no parsable JSON for %s=%s", kind, source_id)
         return
 
+    parent_col = "note_id" if kind == "note" else "document_id"
     chunk_rows = await conn.fetch(
-        "select id, content from public.chunks where document_id=$1 and version=$2",
-        document_id,
+        f"""select id, content from public.document_chunks
+            where {parent_col}=$1 and version=$2""",
+        source_id,
         version,
     )
 
@@ -90,49 +116,53 @@ async def run_entities(
         entity_type = str(entity.get("type", "other")).lower()
         if entity_type not in VALID_TYPES:
             entity_type = "other"
+
         entity_id = await conn.fetchval(
-            """insert into public.entities (user_id, name, normalized_name, entity_type)
+            """insert into public.knowledge_entities
+                 (workspace_id, name, normalized_name, entity_type)
                values ($1,$2,$3,$4)
-               on conflict (user_id, normalized_name) do update
+               on conflict (workspace_id, normalized_name) do update
                  set last_seen_at = now()
                returning id""",
-            user_id,
+            workspace_id,
             name,
             normalized,
             entity_type,
         )
         entity_ids[normalized] = str(entity_id)
 
-        # link to chunks that actually mention the name (cheap, honest, no guessing)
+        # Link only to chunks that actually mention the name: cheap, honest, and
+        # never invented.
         for chunk in chunk_rows:
             if name.lower() in chunk["content"].lower():
                 await conn.execute(
-                    """insert into public.chunk_entities (chunk_id, entity_id, user_id, confidence)
+                    """insert into public.chunk_entities
+                         (chunk_id, entity_id, workspace_id, confidence)
                        values ($1,$2,$3,$4)
                        on conflict (chunk_id, entity_id) do nothing""",
                     chunk["id"],
                     entity_id,
-                    user_id,
+                    workspace_id,
                     0.8,
                 )
 
     for relation in parsed.get("relations", []):
         source_key = normalize_entity_name(str(relation.get("source", "")))
         target_key = normalize_entity_name(str(relation.get("target", "")))
-        source_id = entity_ids.get(source_key)
-        target_id = entity_ids.get(target_key)
-        if not source_id or not target_id or source_id == target_id:
+        source_entity_id = entity_ids.get(source_key)
+        target_entity_id = entity_ids.get(target_key)
+        if not source_entity_id or not target_entity_id or source_entity_id == target_entity_id:
             continue
         label = str(relation.get("relation", "co_occurs"))[:80] or "co_occurs"
         await conn.execute(
-            """insert into public.entity_edges
-                 (user_id, source_entity_id, target_entity_id, relation, weight)
+            """insert into public.knowledge_links
+                 (workspace_id, source_entity_id, target_entity_id, relation, weight)
                values ($1,$2,$3,$4,1)
-               on conflict (user_id, source_entity_id, target_entity_id, relation)
-               do update set weight = public.entity_edges.weight + 1""",
-            user_id,
-            source_id,
-            target_id,
+               on conflict (workspace_id, source_entity_id, target_entity_id, relation)
+               do update set weight = public.knowledge_links.weight + 1""",
+            workspace_id,
+            source_entity_id,
+            target_entity_id,
             label,
         )
 

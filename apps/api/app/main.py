@@ -14,7 +14,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import chat, collections, conversations, documents, graph, jobs, notes, search
+from app.api.routes import (
+    chat,
+    collections,
+    conversations,
+    documents,
+    graph,
+    jobs,
+    notes,
+    search,
+    workspaces,
+)
 from app.core.config import get_settings
 from app.core.db import close_pool, get_pool
 from app.core.errors import register_error_handlers
@@ -61,7 +71,17 @@ def create_app() -> FastAPI:
     install_request_logging(app)
     register_error_handlers(app)
 
-    for module in (documents, notes, collections, search, chat, conversations, graph, jobs):
+    for module in (
+        workspaces,
+        documents,
+        notes,
+        collections,
+        search,
+        chat,
+        conversations,
+        graph,
+        jobs,
+    ):
         app.include_router(module.router, prefix="/v1")
     app.include_router(collections.tags_router, prefix="/v1")
     app.include_router(conversations.messages_router, prefix="/v1")

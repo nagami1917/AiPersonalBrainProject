@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { apiFetch, NexusApiError } from '$lib/api/client';
   import { uploadFile } from '$lib/api/supabase';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import type { DocumentSummary, Meta } from '$lib/api/types';
   import StatusPill from '$lib/components/StatusPill.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
@@ -17,9 +18,10 @@
   let dragOver = $state(false);
 
   async function load() {
+    if (!$activeWorkspaceId) return;
     try {
       const [docs, metaResponse] = await Promise.all([
-        apiFetch<{ items: DocumentSummary[] }>('/v1/documents'),
+        apiFetch<{ items: DocumentSummary[] }>(wsPath('/documents')),
         apiFetch<Meta>('/v1/meta')
       ]);
       documents = docs.items;
@@ -47,14 +49,14 @@
         const { document_id, storage_path } = await apiFetch<{
           document_id: string;
           storage_path: string;
-        }>('/v1/documents/upload-url', {
+        }>(wsPath('/documents/upload-url'), {
           method: 'POST',
           body: { filename: file.name, mime_type: file.type || 'text/plain', file_size: file.size }
         });
 
         await uploadFile(storage_path, file);
 
-        await apiFetch('/v1/documents', {
+        await apiFetch(wsPath('/documents'), {
           method: 'POST',
           body: {
             document_id,
@@ -76,7 +78,7 @@
 
   async function remove(id: string) {
     try {
-      await apiFetch(`/v1/documents/${id}`, { method: 'DELETE' });
+      await apiFetch(wsPath(`/documents/${id}`), { method: 'DELETE' });
       documents = documents.filter((d) => d.id !== id);
     } catch (err) {
       error = err instanceof NexusApiError ? { message: err.message, code: err.code } : null;
@@ -161,7 +163,7 @@
               {doc.title}
             </a>
             <p class="mt-0.5 text-[11px] text-ink-500">
-              {doc.source_type === 'note' ? 'Note' : (doc.mime_type ?? 'File')}
+              {doc.mime_type ?? 'File'}
               {#if doc.file_size}· {formatBytes(doc.file_size)}{/if}
               {#if doc.page_count}· {doc.page_count} pages{/if}
               · {relativeTime(doc.updated_at)}

@@ -110,7 +110,7 @@ An optional LLM query-rewrite step exists but is behind a flag: adding a model c
 
 Two independent candidate sets, fused. Neither arm alone is sufficient: embeddings miss exact identifiers (names, error codes, citations); keyword search misses paraphrase.
 
-**Vector arm** — HNSW over `chunks.embedding`, `ORDER BY embedding <=> $vec`, top 40 candidates, filtered by `user_id` (+ optional collection/date).
+**Vector arm** — HNSW over `document_chunks.embedding`, `ORDER BY embedding <=> $vec`, top 40 candidates, filtered by `workspace_id` (+ optional collection/date/kind). Chunks are parented by a note *or* a document, so both kinds compete in the same ranking.
 
 **Keyword arm** — `tsvector` over `content`, `ts_rank_cd`, top 40 candidates, same filters.
 

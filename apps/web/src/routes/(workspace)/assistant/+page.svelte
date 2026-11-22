@@ -12,6 +12,8 @@
   import { streamChat, type ChatEvent, type Citation, type SourcePreview } from '$lib/api/client';
   import AnswerBody from '$lib/components/AnswerBody.svelte';
   import { cx } from '$lib/utils/cx';
+  import { sourceHref, sourceLabel } from '$lib/utils/sources';
+  import { activeWorkspaceId } from '$lib/stores/workspace';
 
   type Turn = {
     id: string;
@@ -32,7 +34,8 @@
 
   async function ask() {
     const text = question.trim();
-    if (!text || busy) return;
+    const workspaceId = $activeWorkspaceId;
+    if (!text || busy || !workspaceId) return;
 
     error = null;
     busy = true;
@@ -53,6 +56,7 @@
 
     try {
       await streamChat(
+        workspaceId,
         { conversation_id: conversationId, message: text },
         (event: ChatEvent) => {
           const target = turns.find((t) => t.id === turn.id);
@@ -136,7 +140,7 @@
           <p class="text-[11px] text-ink-500">
             Reading {turn.sources.length}
             {turn.sources.length === 1 ? 'source' : 'sources'}:
-            {turn.sources.map((s) => s.document_title).join(', ')}
+            {turn.sources.map((s) => s.source_title).join(', ')}
           </p>
         {/if}
 
@@ -170,7 +174,12 @@
               <li class="flex gap-2 text-[11px] text-ink-400">
                 <span class="cite-chip">{citation.marker}</span>
                 <span class="min-w-0">
-                  <span class="text-ink-200">{citation.document_title}</span>
+                  <span class="text-[10px] uppercase tracking-wide text-ink-500">
+                    {sourceLabel(citation.source_kind)}
+                  </span>
+                  <a
+                    href={sourceHref(citation.source_kind, citation.source_id)}
+                    class="text-ink-200 hover:text-accent-400">{citation.source_title}</a>
                   {#if citation.page}<span class="text-ink-500"> · p.{citation.page}</span>{/if}
                   <span class="mt-0.5 block truncate italic text-ink-500">“{citation.quote}”</span>
                 </span>

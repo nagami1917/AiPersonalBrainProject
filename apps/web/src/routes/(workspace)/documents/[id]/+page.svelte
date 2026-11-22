@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { apiFetch, NexusApiError } from '$lib/api/client';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import type { DocumentDetail } from '$lib/api/types';
   import StatusPill from '$lib/components/StatusPill.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
@@ -16,7 +17,8 @@
 
   async function fetchDocument() {
     try {
-      document = await apiFetch<DocumentDetail>(`/v1/documents/${id}`);
+      if (!$activeWorkspaceId) return;
+      document = await apiFetch<DocumentDetail>(wsPath(`/documents/${id}`));
       // Poll only while there is genuinely something to wait for.
       if (document.status === 'processing' || document.status === 'pending') {
         polling ??= setInterval(fetchDocument, 2500);
@@ -43,7 +45,7 @@
   });
 
   async function reprocess() {
-    await apiFetch(`/v1/documents/${id}/reprocess`, { method: 'POST' });
+    await apiFetch(wsPath(`/documents/${id}/reprocess`), { method: 'POST' });
     void fetchDocument();
   }
 </script>
@@ -65,7 +67,7 @@
       </div>
 
       <p class="text-xs text-ink-500">
-        {document.source_type === 'note' ? 'Note' : (document.mime_type ?? 'File')}
+        {document.mime_type ?? 'File'}
         {#if document.page_count}· {document.page_count} pages{/if}
         {#if document.file_size}· {formatBytes(document.file_size)}{/if}
         · {document.chunk_count} searchable passages

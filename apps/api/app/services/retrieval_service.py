@@ -8,7 +8,7 @@ import asyncpg
 
 from app.ai.grounding import Source
 from app.ai.providers import Embedder
-from app.ai.retrieval import Hit, dedupe, limit_per_document, row_to_hit, to_sources
+from app.ai.retrieval import Hit, dedupe, limit_per_source, row_to_hit, to_sources
 from app.core.config import Settings
 from app.core.errors import ProviderUnavailable
 from app.repositories import search as search_repo
@@ -34,7 +34,7 @@ class RetrievalResult:
 async def retrieve(
     conn: asyncpg.Connection,
     *,
-    user_id: str,
+    workspace_id: str,
     query: str,
     embedder: Embedder,
     settings: Settings,
@@ -52,7 +52,7 @@ async def retrieve(
         except ProviderUnavailable:
             # Deliberately NOT a silent keyword-only fallback for chat: the
             # caller decides, because presenting degraded retrieval as full
-            # quality would misrepresent the answer's grounding.
+            # quality would misrepresent how well the answer is grounded.
             if mode == "semantic":
                 raise
             log.warning("embedding unavailable; hybrid degraded to keyword arm")
@@ -60,7 +60,7 @@ async def retrieve(
 
     rows = await search_repo.hybrid(
         conn,
-        user_id=user_id,
+        workspace_id=workspace_id,
         query=query,
         embedding=embedding,
         match_count=match_count or settings.retrieval_k,
@@ -68,24 +68,22 @@ async def retrieve(
         vector_weight=settings.vector_weight,
         keyword_weight=settings.keyword_weight,
         rrf_k=settings.rrf_k,
+        min_similarity=settings.min_similarity,
         collection_id=filters.collection_id,
-        document_ids=filters.document_ids,
         created_after=filters.created_after,
         created_before=filters.created_before,
-        min_similarity=settings.min_similarity,
+        source_ids=filters.source_ids,
+        kind=filters.kind,
     )
 
     hits = [row_to_hit(row) for row in rows]
     hits = dedupe(hits)
-    hits = limit_per_document(hits)
+    hits = limit_per_source(hits)
     hits = hits[: (match_count or settings.retrieval_k)]
-
-    vector_count = sum(1 for h in hits if h.vector_rank)
-    keyword_count = sum(1 for h in hits if h.keyword_rank)
 
     return RetrievalResult(
         hits=hits,
         sources=to_sources(hits),
-        vector_candidates=vector_count,
-        keyword_candidates=keyword_count,
+        vector_candidates=sum(1 for h in hits if h.vector_rank),
+        keyword_candidates=sum(1 for h in hits if h.keyword_rank),
     )

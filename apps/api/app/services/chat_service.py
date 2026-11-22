@@ -1,12 +1,14 @@
 """Chat orchestration and the grounded-answer contract in practice.
 
-Two invariants live here, and both are asserted by tests:
+Three invariants live here, all asserted by tests:
 
   1. If retrieval is empty (or below the floor), the LLM is NEVER called. The
      refusal is deterministic and cheap.
-  2. Persisted citations come from resolve_citations(), which only emits rows
-     for markers that map to real retrieved chunks. A fabricated [9] produces
-     no citation row.
+  2. Persisted citations come from resolve_citations(), which only emits rows for
+     markers that map to real retrieved chunks. A fabricated [9] produces no
+     citation row.
+  3. Every conversation, message and citation is written with the workspace id
+     taken from the resolved context — never from the request body.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from app.ai.grounding import (
 from app.ai.prompts import build_user_turn
 from app.ai.providers import LLM, Embedder
 from app.core.config import Settings
+from app.core.errors import NotFound
 from app.schemas.chat import ChatRequest, CitationOut
 from app.services.retrieval_service import retrieve
 
@@ -37,23 +40,24 @@ log = logging.getLogger(__name__)
 
 
 async def _ensure_conversation(
-    conn: asyncpg.Connection, user_id: str, conversation_id: str | None
+    conn: asyncpg.Connection, *, workspace_id: str, user_id: str, conversation_id: str | None
 ) -> str:
     if conversation_id:
-        exists = await conn.fetchval(
-            "select id from public.conversations where id=$1 and user_id=$2",
+        existing = await conn.fetchval(
+            "select id from public.conversations where id=$1 and workspace_id=$2",
             conversation_id,
-            user_id,
+            workspace_id,
         )
-        if not exists:
-            from app.core.errors import NotFound
-
+        if not existing:
             raise NotFound("Conversation not found")
-        return str(exists)
+        return str(existing)
 
     return str(
         await conn.fetchval(
-            "insert into public.conversations (user_id) values ($1) returning id", user_id
+            """insert into public.conversations (workspace_id, created_by)
+               values ($1,$2) returning id""",
+            workspace_id,
+            user_id,
         )
     )
 
@@ -62,7 +66,7 @@ async def _history(
     conn: asyncpg.Connection, conversation_id: str, limit: int = 8
 ) -> list[dict[str, str]]:
     rows = await conn.fetch(
-        """select role, content from public.messages
+        """select role, content from public.chat_messages
            where conversation_id=$1 and role in ('user','assistant')
            order by created_at desc limit $2""",
         conversation_id,
@@ -72,13 +76,13 @@ async def _history(
 
 
 async def _persist_user_message(
-    conn: asyncpg.Connection, user_id: str, conversation_id: str, content: str
+    conn: asyncpg.Connection, *, workspace_id: str, conversation_id: str, content: str
 ) -> str:
     return str(
         await conn.fetchval(
-            """insert into public.messages (user_id, conversation_id, role, content)
+            """insert into public.chat_messages (workspace_id, conversation_id, role, content)
                values ($1,$2,'user',$3) returning id""",
-            user_id,
+            workspace_id,
             conversation_id,
             content,
         )
@@ -88,39 +92,40 @@ async def _persist_user_message(
 async def _persist_assistant_message(
     conn: asyncpg.Connection,
     *,
-    user_id: str,
+    workspace_id: str,
     conversation_id: str,
     answer: GroundedAnswer,
     model: str,
     latency_ms: int,
-    tokens_in: int | None = None,
-    tokens_out: int | None = None,
 ) -> str:
     message_id = await conn.fetchval(
-        """insert into public.messages
-             (user_id, conversation_id, role, content, grounded, model, latency_ms,
-              tokens_in, tokens_out)
-           values ($1,$2,'assistant',$3,$4,$5,$6,$7,$8) returning id""",
-        user_id,
+        """insert into public.chat_messages
+             (workspace_id, conversation_id, role, content, grounded, model, latency_ms)
+           values ($1,$2,'assistant',$3,$4,$5,$6) returning id""",
+        workspace_id,
         conversation_id,
         answer.content,
         answer.grounded,
         model,
         latency_ms,
-        tokens_in,
-        tokens_out,
     )
 
     for citation in answer.citations:
+        # source_kind decides which parent column is populated; the CHECK in
+        # migration 0005 rejects any mismatch, so a bad citation fails loudly
+        # rather than persisting in a half-valid state.
+        is_note = citation.source_kind == "note"
         await conn.execute(
-            """insert into public.message_citations
-                 (user_id, message_id, chunk_id, document_id, document_title, marker,
-                  quote, page, heading_path, score)
-               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
-            user_id,
+            """insert into public.message_sources
+                 (workspace_id, message_id, chunk_id, source_kind, note_id, document_id,
+                  source_title, marker, quote, page, heading_path, score)
+               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+            workspace_id,
             message_id,
             citation.chunk_id,
-            citation.document_id,
+            citation.source_kind,
+            citation.document_id if is_note else None,
+            None if is_note else citation.document_id,
             citation.document_title,
             citation.marker,
             citation.quote,
@@ -146,8 +151,9 @@ def _to_out(citation: Citation) -> CitationOut:
     return CitationOut(
         marker=citation.marker,
         chunk_id=citation.chunk_id,
-        document_id=citation.document_id,
-        document_title=citation.document_title,
+        source_kind=citation.source_kind,  # type: ignore[arg-type]
+        source_id=citation.document_id,
+        source_title=citation.document_title,
         quote=citation.quote,
         page=citation.page,
         heading_path=citation.heading_path,
@@ -158,6 +164,7 @@ def _to_out(citation: Citation) -> CitationOut:
 async def answer(
     conn: asyncpg.Connection,
     *,
+    workspace_id: str,
     user_id: str,
     request: ChatRequest,
     embedder: Embedder,
@@ -165,17 +172,23 @@ async def answer(
     settings: Settings,
 ) -> tuple[str, str, GroundedAnswer]:
     started = time.perf_counter()
-    conversation_id = await _ensure_conversation(conn, user_id, request.conversation_id)
-    await _persist_user_message(conn, user_id, conversation_id, request.message)
+    conversation_id = await _ensure_conversation(
+        conn,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        conversation_id=request.conversation_id,
+    )
+    await _persist_user_message(
+        conn, workspace_id=workspace_id, conversation_id=conversation_id, content=request.message
+    )
 
     history = await _history(conn, conversation_id)
-    # Drop the message we just stored from the "history" passed to the model.
     if history and history[-1]["role"] == "user":
         history = history[:-1]
 
     result = await retrieve(
         conn,
-        user_id=user_id,
+        workspace_id=workspace_id,
         query=request.message,
         embedder=embedder,
         settings=settings,
@@ -185,14 +198,13 @@ async def answer(
 
     if should_refuse(result.sources, settings.score_floor):
         answer_obj = GroundedAnswer(content=REFUSAL_TEMPLATE, grounded=False)
-        latency = int((time.perf_counter() - started) * 1000)
         message_id = await _persist_assistant_message(
             conn,
-            user_id=user_id,
+            workspace_id=workspace_id,
             conversation_id=conversation_id,
             answer=answer_obj,
             model="none",
-            latency_ms=latency,
+            latency_ms=int((time.perf_counter() - started) * 1000),
         )
         return message_id, conversation_id, answer_obj
 
@@ -200,14 +212,13 @@ async def answer(
     raw_output = await llm.complete(SYSTEM_PROMPT, user_turn)
     answer_obj = resolve_citations(raw_output, result.sources)
 
-    latency = int((time.perf_counter() - started) * 1000)
     message_id = await _persist_assistant_message(
         conn,
-        user_id=user_id,
+        workspace_id=workspace_id,
         conversation_id=conversation_id,
         answer=answer_obj,
         model=llm.model,
-        latency_ms=latency,
+        latency_ms=int((time.perf_counter() - started) * 1000),
     )
     return message_id, conversation_id, answer_obj
 
@@ -215,6 +226,7 @@ async def answer(
 async def stream_answer(
     conn: asyncpg.Connection,
     *,
+    workspace_id: str,
     user_id: str,
     request: ChatRequest,
     embedder: Embedder,
@@ -228,15 +240,22 @@ async def stream_answer(
     fact. `citations` arrives after the text, resolving markers that streamed.
     """
     started = time.perf_counter()
-    conversation_id = await _ensure_conversation(conn, user_id, request.conversation_id)
-    await _persist_user_message(conn, user_id, conversation_id, request.message)
+    conversation_id = await _ensure_conversation(
+        conn,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        conversation_id=request.conversation_id,
+    )
+    await _persist_user_message(
+        conn, workspace_id=workspace_id, conversation_id=conversation_id, content=request.message
+    )
     history = await _history(conn, conversation_id)
     if history and history[-1]["role"] == "user":
         history = history[:-1]
 
     result = await retrieve(
         conn,
-        user_id=user_id,
+        workspace_id=workspace_id,
         query=request.message,
         embedder=embedder,
         settings=settings,
@@ -250,8 +269,9 @@ async def stream_answer(
             "sources": [
                 {
                     "marker": s.marker,
-                    "document_id": s.document_id,
-                    "document_title": s.document_title,
+                    "source_kind": s.source_kind,
+                    "source_id": s.document_id,
+                    "source_title": s.document_title,
                     "page": s.page_start,
                     "heading_path": s.heading_path,
                 }
@@ -264,7 +284,7 @@ async def stream_answer(
         answer_obj = GroundedAnswer(content=REFUSAL_TEMPLATE, grounded=False)
         message_id = await _persist_assistant_message(
             conn,
-            user_id=user_id,
+            workspace_id=workspace_id,
             conversation_id=conversation_id,
             answer=answer_obj,
             model="none",
@@ -294,7 +314,7 @@ async def stream_answer(
     # Persist the RESOLVED content: fabricated markers never reach history.
     message_id = await _persist_assistant_message(
         conn,
-        user_id=user_id,
+        workspace_id=workspace_id,
         conversation_id=conversation_id,
         answer=answer_obj,
         model=llm.model,

@@ -1,20 +1,56 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
-DocumentStatus = Literal["pending", "processing", "ready", "failed", "archived"]
-SourceType = Literal["upload", "note", "conversation"]
 ProcessingStage = Literal["extracting", "chunking", "embedding", "entities"]
+
+# Notes and documents share a status vocabulary but not a table.
+ItemStatus = Literal["pending", "processing", "ready", "failed", "archived"]
+
+
+class NoteSummary(BaseModel):
+    id: str
+    kind: Literal["note"] = "note"
+    title: str
+    status: ItemStatus
+    processing_stage: ProcessingStage | None = None
+    collection_id: str | None = None
+    summary: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class NoteDetail(NoteSummary):
+    body: str | None = None
+    error_message: str | None = None
+    version: int = 1
+    embedding_model: str | None = None
+    chunk_count: int = 0
+
+
+class NoteCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1)
+    collection_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class NoteUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    body: str | None = None
+    collection_id: str | None = None
+    tags: list[str] | None = None
 
 
 class DocumentSummary(BaseModel):
     id: str
+    kind: Literal["document"] = "document"
     title: str
-    source_type: SourceType
-    status: DocumentStatus
+    status: ItemStatus
     processing_stage: ProcessingStage | None = None
     collection_id: str | None = None
     mime_type: str | None = None
@@ -59,12 +95,12 @@ class DocumentUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
     collection_id: str | None = None
     tags: list[str] | None = None
-    raw_text: str | None = None
 
 
-class DocumentStatusResponse(BaseModel):
+class StatusResponse(BaseModel):
     id: str
-    status: DocumentStatus
+    kind: Literal["note", "document"]
+    status: ItemStatus
     processing_stage: ProcessingStage | None = None
     progress_pct: int
     error_message: str | None = None
@@ -72,6 +108,7 @@ class DocumentStatusResponse(BaseModel):
 
 class ChunkPreview(BaseModel):
     id: str
+    kind: Literal["note", "document"]
     ordinal: int
     content: str
     heading_path: str | None = None
@@ -79,8 +116,3 @@ class ChunkPreview(BaseModel):
     char_start: int | None = None
     char_end: int | None = None
     token_count: int | None = None
-
-
-class Page(BaseModel):
-    items: list[dict[str, Any]]
-    next_cursor: str | None = None

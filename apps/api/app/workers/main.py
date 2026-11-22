@@ -29,32 +29,35 @@ log = logging.getLogger("nexus.worker")
 _stopping = asyncio.Event()
 
 
+IN_PROGRESS_TYPES = ("ingest_note", "ingest_document", "reindex")
+
+
 async def handle_job(job: Job, pool, embedder, llm, settings) -> None:  # type: ignore[no-untyped-def]
     async with pool.acquire() as conn:
-        if job.job_type in ("ingest", "reindex"):
-            if not job.document_id:
-                raise ValueError(f"{job.job_type} job without document_id")
+        target = job.target
+        if job.job_type in IN_PROGRESS_TYPES:
+            if target is None:
+                raise ValueError(f"{job.job_type} job without a note or document")
+            kind, source_id = target
             await ingest.run_ingest(
                 conn,
                 job_id=job.id,
-                user_id=job.user_id,
-                document_id=job.document_id,
+                kind=kind,
+                source_id=source_id,
                 embedder=embedder,
                 settings=settings,
             )
         elif job.job_type == "summary":
-            if job.document_id:
+            if target is not None:
+                kind, source_id = target
                 await enrich.run_summary(
-                    conn, document_id=job.document_id, payload=job.payload, llm=llm
+                    conn, kind=kind, source_id=source_id, payload=job.payload, llm=llm
                 )
         elif job.job_type == "entities":
-            if job.document_id:
+            if target is not None:
+                kind, source_id = target
                 await enrich.run_entities(
-                    conn,
-                    user_id=job.user_id,
-                    document_id=job.document_id,
-                    payload=job.payload,
-                    llm=llm,
+                    conn, kind=kind, source_id=source_id, payload=job.payload, llm=llm
                 )
         elif job.job_type == "purge":
             await purge_document(conn, job, settings)
@@ -63,16 +66,27 @@ async def handle_job(job: Job, pool, embedder, llm, settings) -> None:  # type: 
 
 
 async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-untyped-def]
-    """Hard-delete a soft-deleted document and its storage object."""
-    if not job.document_id:
+    """Hard-delete a soft-deleted source, and its storage object if it has one."""
+    target = job.target
+    if target is None:
         return
+    kind, source_id = target
+
+    if kind == "note":
+        row = await conn.fetchrow("select deleted_at from public.notes where id=$1", source_id)
+        if row is None or row["deleted_at"] is None:
+            log.info("purge skipped: note %s is not soft-deleted", source_id)
+            return
+        await conn.execute("delete from public.notes where id=$1", source_id)
+        return
+
     row = await conn.fetchrow(
-        "select storage_path, deleted_at from public.documents where id=$1", job.document_id
+        "select storage_path, deleted_at from public.documents where id=$1", source_id
     )
     if row is None:
         return
     if row["deleted_at"] is None:
-        log.info("purge skipped: document %s is not soft-deleted", job.document_id)
+        log.info("purge skipped: document %s is not soft-deleted", source_id)
         return
 
     if row["storage_path"]:
@@ -91,7 +105,7 @@ async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-u
                 },
             )
 
-    await conn.execute("delete from public.documents where id=$1", job.document_id)
+    await conn.execute("delete from public.documents where id=$1", source_id)
 
 
 async def worker_loop(slot: int) -> None:
@@ -118,14 +132,17 @@ async def worker_loop(slot: int) -> None:
                 log.exception("job %s failed", job.id)
                 async with pool.acquire() as conn:
                     await mark_failed(conn, job, str(exc))
-                    await conn.execute(
-                        """update public.documents
-                           set status = case when $2::text is null then status else 'failed' end,
-                               error_message = $2
-                           where id = $1 and status <> 'ready'""",
-                        job.document_id,
-                        str(exc)[:500] if job.document_id else None,
-                    )
+                    target = job.target
+                    if target is not None:
+                        kind, source_id = target
+                        table = "notes" if kind == "note" else "documents"
+                        await conn.execute(
+                            f"""update public.{table}
+                                set status = 'failed', error_message = $2
+                                where id = $1 and status <> 'ready'""",
+                            source_id,
+                            str(exc)[:500],
+                        )
         except Exception:
             log.exception("worker loop error")
             await asyncio.sleep(5)

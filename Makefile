@@ -95,6 +95,11 @@ test-api: ## pytest (needs DATABASE_URL pointing at a migrated database)
 test-db: ## schema + RLS + retrieval tests only
 	cd $(API) && .venv/bin/pytest -q tests/db
 
+.PHONY: test-tenancy
+test-tenancy: ## raw-SQL workspace isolation assertions (needs DATABASE_URL)
+	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is not set" && exit 1)
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f supabase/tests/tenancy.sql
+
 # --- deploy ------------------------------------------------------------------
 .PHONY: migrate-remote
 migrate-remote: ## push migrations to the linked Supabase project

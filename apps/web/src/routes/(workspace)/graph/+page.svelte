@@ -8,6 +8,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { apiFetch, NexusApiError } from '$lib/api/client';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import type { Entity } from '$lib/api/types';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
@@ -49,7 +50,8 @@
 
   async function load(entityId: string | null) {
     try {
-      const list = await apiFetch<Entity[]>('/v1/graph/entities?limit=40');
+      if (!$activeWorkspaceId) return;
+      const list = await apiFetch<Entity[]>(wsPath('/graph/entities?limit=40'));
       entities = list;
       const seed = entityId ?? list[0]?.id ?? null;
       selected = seed;

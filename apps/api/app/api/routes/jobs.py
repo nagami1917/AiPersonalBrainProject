@@ -2,40 +2,46 @@ from __future__ import annotations
 
 from typing import Any
 
-import asyncpg
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Query
 
-from app.core.deps import current_user, user_db
-from app.core.security import AuthUser
+from app.core.deps import UserConn, WorkspaceCtx
 
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+# Users may read the queue (it explains why their file is still processing) but
+# never write to it. Enqueueing is a server-side decision, enforced by grants in
+# migration 0011 and by the RLS policies in 0007.
+router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["jobs"])
 
 
 @router.get("", response_model=list[dict[str, Any]])
 async def list_jobs(
+    ctx: WorkspaceCtx,
+    conn: UserConn,
     status: str | None = None,
-    document_id: str | None = None,
-    limit: int = 50,
-    user: AuthUser = Depends(current_user),
-    conn: asyncpg.Connection = Depends(user_db),
+    kind: str | None = None,
+    source_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        """select id, document_id, job_type, status, attempts, max_attempts,
+        """select id, note_id, document_id, job_type, status, attempts, max_attempts,
                   last_error, run_after, created_at, updated_at
-           from public.jobs
-           where user_id=$1
+           from public.processing_jobs
+           where workspace_id=$1
              and ($2::text is null or status=$2)
-             and ($3::uuid is null or document_id=$3)
-           order by created_at desc limit $4""",
-        user.id,
+             and ($3::text is null or job_type=$3)
+             and ($4::uuid is null or note_id=$4 or document_id=$4)
+           order by created_at desc limit $5""",
+        ctx.id,
         status,
-        document_id,
+        kind,
+        source_id,
         limit,
     )
     return [
         {
             "id": str(r["id"]),
+            "note_id": str(r["note_id"]) if r["note_id"] else None,
             "document_id": str(r["document_id"]) if r["document_id"] else None,
+            "target_kind": "note" if r["note_id"] else ("document" if r["document_id"] else None),
             "job_type": r["job_type"],
             "status": r["status"],
             "attempts": r["attempts"],

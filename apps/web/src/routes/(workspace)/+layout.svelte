@@ -2,6 +2,8 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { session, sessionReady, signOut } from '$lib/stores/session';
+  import { loadWorkspaces } from '$lib/stores/workspace';
+  import WorkspaceSwitcher from '$lib/components/WorkspaceSwitcher.svelte';
   import { cx } from '$lib/utils/cx';
 
   let { children } = $props();
@@ -12,6 +14,12 @@
     if ($sessionReady && !$session) {
       goto('/login');
     }
+  });
+
+  // The workspace list is loaded once per session, not per page: every page then
+  // builds its API paths from the same active workspace.
+  $effect(() => {
+    if ($session) void loadWorkspaces();
   });
 
   const nav = [
@@ -31,6 +39,10 @@
   <aside class="hidden w-56 shrink-0 border-r border-ink-800 lg:flex lg:flex-col">
     <div class="px-4 py-5">
       <a href="/dashboard" class="text-lg font-semibold tracking-tight text-ink-50">NEXUS</a>
+    </div>
+
+    <div class="px-2 pb-3">
+      <WorkspaceSwitcher />
     </div>
 
     <nav class="flex-1 space-y-0.5 px-2">

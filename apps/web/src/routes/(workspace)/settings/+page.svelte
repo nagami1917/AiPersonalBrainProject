@@ -5,6 +5,9 @@
   import { session } from '$lib/stores/session';
   import type { Meta } from '$lib/api/types';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
+  import WorkspaceMembers from '$lib/components/WorkspaceMembers.svelte';
+  import { activeWorkspace } from '$lib/stores/workspace';
+  import { ROLE_LABEL } from '$lib/api/types';
 
   let meta = $state<Meta | null>(null);
   let error = $state<{ message: string; code?: string } | null>(null);
@@ -38,7 +41,20 @@
       </div>
       <button class="btn-ghost" onclick={signOut}>Sign out</button>
     </div>
+    {#if $activeWorkspace}
+      <div class="px-4 py-3">
+        <p class="text-sm text-ink-100">{$activeWorkspace.name}</p>
+        <p class="text-xs text-ink-500">
+          Your role: {ROLE_LABEL[$activeWorkspace.role]}
+          {#if $activeWorkspace.personal}
+            · this is your personal workspace
+          {/if}
+        </p>
+      </div>
+    {/if}
   </section>
+
+  <WorkspaceMembers />
 
   {#if meta}
     <section class="card p-4">

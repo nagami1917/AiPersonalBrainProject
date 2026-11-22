@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { apiFetch, NexusApiError } from '$lib/api/client';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import type { DocumentSummary, Entity, Job, SearchResult } from '$lib/api/types';
   import StatusPill from '$lib/components/StatusPill.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
@@ -17,11 +18,12 @@
   const failed = $derived(documents.filter((d) => d.status === 'failed'));
 
   onMount(async () => {
+    if (!$activeWorkspaceId) return;
     try {
       const [docs, jobList, ents] = await Promise.all([
-        apiFetch<{ items: DocumentSummary[] }>('/v1/documents?limit=6'),
-        apiFetch<Job[]>('/v1/jobs?limit=5'),
-        apiFetch<Entity[]>('/v1/graph/entities?limit=8')
+        apiFetch<{ items: DocumentSummary[] }>(wsPath('/documents?limit=6')),
+        apiFetch<Job[]>(wsPath('/jobs?limit=5')),
+        apiFetch<Entity[]>(wsPath('/graph/entities?limit=8'))
       ]);
       documents = docs.items;
       jobs = jobList;
@@ -100,7 +102,7 @@
                 {doc.title}
               </a>
               <p class="text-[11px] text-ink-500">
-                {doc.source_type === 'note' ? 'Note' : 'Upload'} · {relativeTime(doc.updated_at)}
+                Document · {relativeTime(doc.updated_at)}
               </p>
             </div>
             <StatusPill status={doc.status} stage={doc.processing_stage} />
