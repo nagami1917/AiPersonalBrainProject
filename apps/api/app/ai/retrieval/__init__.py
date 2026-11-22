@@ -165,6 +165,7 @@ def to_sources(hits: Sequence[Hit]) -> list[Source]:
             char_end=hit.char_end,
             score=hit.fused_score,
             source_kind=hit.source_kind,
+            source_filename=hit.source_filename,
         )
         for i, hit in enumerate(hits, start=1)
     ]

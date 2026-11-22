@@ -47,6 +47,7 @@ returns table (
   note_id         uuid,
   document_id     uuid,
   source_title    text,
+  source_filename text,
   content         text,
   heading_path    text,
   page_number     integer,
@@ -84,6 +85,9 @@ filtered as (
     c.char_end                 as cend,
     c.embedding                as emb,
     coalesce(n.title, d.title) as stitle,
+    -- the spec's citation shape names the uploaded file; notes have none, so the
+    -- title doubles as the display name there
+    coalesce(n.title, d.filename, d.title) as sfilename,
     coalesce(n.collection_id, d.collection_id) as coll,
     coalesce(n.created_at, d.created_at)       as created
   from public.document_chunks c
@@ -174,6 +178,7 @@ select
   f.nid,
   f.did,
   f.stitle,
+  f.sfilename,
   f.body,
   f.hpath,
   f.pstart,

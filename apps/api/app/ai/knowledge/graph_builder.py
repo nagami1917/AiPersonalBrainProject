@@ -84,9 +84,9 @@ async def upsert_relation(
 ) -> None:
     await conn.execute(
         """insert into public.knowledge_links
-             (workspace_id, source_entity_id, target_entity_id, relation, weight)
+             (workspace_id, source_id, target_id, relation, weight)
            values ($1,$2,$3,$4,1)
-           on conflict (workspace_id, source_entity_id, target_entity_id, relation)
+           on conflict (workspace_id, source_id, target_id, relation)
            do update set weight = public.knowledge_links.weight + 1""",
         workspace_id,
         source_id,

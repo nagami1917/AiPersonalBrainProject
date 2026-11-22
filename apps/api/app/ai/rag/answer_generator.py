@@ -40,6 +40,7 @@ class Citation:
     heading_path: str | None
     score: float
     source_kind: str = "document"
+    source_filename: str | None = None
 
 
 @dataclass
@@ -98,6 +99,7 @@ def resolve_citations(
                 heading_path=source.heading_path,
                 score=round(source.score, 4),
                 source_kind=source.source_kind,
+                source_filename=source.source_filename,
             )
         )
 

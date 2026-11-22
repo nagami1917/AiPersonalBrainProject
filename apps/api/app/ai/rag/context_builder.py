@@ -38,6 +38,9 @@ class Source:
     char_end: int | None = None
     score: float = 0.0
     source_kind: str = "document"
+    # File name for document sources; None for notes. The spec's citation shape
+    # names the file, so the value has to survive retrieval → context → citation.
+    source_filename: str | None = None
 
     def to_context_block(self) -> str:
         attrs = [

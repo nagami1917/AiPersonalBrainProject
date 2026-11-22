@@ -54,7 +54,45 @@ Supabase Auth owns signup, login, OAuth, password reset, and token refresh. **Fa
 
 - Frontend obtains a session from Supabase; the access token is attached to every API call.
 - FastAPI verifies the JWT signature (JWKS, cached; key rotation handled), validates `aud`/`iss`/`exp`, then sets the request's user context.
-- A `POST /v1/auth/session-check` endpoint exists only for the client to validate a token after a cold start and receive the user's profile + quota state in one call.
+- `GET /v1/auth/me` is the cold-start call: it validates the token implicitly (it would not
+  authorise without one) and returns the profile, the caller's workspaces, and
+  `default_workspace_id` in one response. The frontend needs all three before it can render
+  anything, and making it infer a default from the workspace list is how a user lands in the
+  wrong workspace on first load.
+
+```json
+{
+  "user": {"id": "uuid", "email": "a@b.c", "display_name": "Ada", "avatar_url": null},
+  "workspaces": [{"id": "uuid", "name": "Personal", "slug": "personal", "role": "owner", "personal": true}],
+  "default_workspace_id": "uuid"
+}
+```
+
+---
+
+## 2a. Two path shapes, one implementation
+
+The spec lists resources flat (`GET /notes`, `POST /ai/chat`, `GET /graph`). This API nests
+them (`GET /v1/workspaces/{id}/notes`) because a workspace in the path is how authorisation,
+the RLS identity, and every other resource route work — and because a workspace that silently
+falls back to "some workspace" is a tenancy hazard.
+
+Both shapes are served, from one implementation each:
+
+| Shape | Path | Workspace comes from |
+|---|---|---|
+| Scoped (canonical) | `/v1/workspaces/{id}/notes` | the path, always explicit |
+| Flat (spec) | `/v1/notes?workspace_id=…` | the query parameter, or `profiles.default_workspace_id` |
+
+The flat forms delegate to the scoped view functions, so a tenancy or `status` fix cannot be
+made in one copy and forgotten in the other. An explicit `workspace_id` is authorised exactly
+like the path form: **a workspace you are not a member of is `404`, never `403`**, because the
+API does not confirm that someone else's workspace exists. Omitting it is not a bypass — it
+selects your own default.
+
+Aliases exist only where the meaning is unambiguous. `POST /documents/upload` has no alias: it
+is a two-step signed-URL flow whose response depends on the workspace, and guessing a default
+for a write that creates storage objects is not a convenience worth having.
 
 ---
 
@@ -66,6 +104,32 @@ Supabase Auth owns signup, login, OAuth, password reset, and token refresh. **Fa
 |---|---|---|
 | `GET` | `/health` | Liveness. No auth. Returns `{status, version, commit}` |
 | `GET` | `/v1/meta` | Public capability document: supported file types, size limits, embedding model id, feature flags. The frontend uses this to avoid hardcoding limits |
+
+---
+
+### 3.1a Flat aliases (spec §5.1 shape)
+
+Every entry delegates to its scoped counterpart. `workspace_id` is always optional and always
+authorised the same way.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/auth/me` | Identity + workspaces + default workspace |
+| `GET` | `/v1/notes` | List notes |
+| `POST` | `/v1/notes` | Create note (`202`; chunking is asynchronous) |
+| `GET` | `/v1/documents` | List documents |
+| `GET` | `/v1/documents/{id}` | Document details |
+| `DELETE` | `/v1/documents/{id}` | Delete document |
+| `POST` | `/v1/documents/{id}/reprocess` | Reprocess (`202`) |
+| `GET` | `/v1/collections` | List collections |
+| `POST` | `/v1/collections` | Create collection |
+| `GET` | `/v1/conversations` | Chat history |
+| `GET` | `/v1/conversations/{id}` | Conversation with messages and citations |
+| `GET` | `/v1/search?q=` | Search (`mode`, `limit`, `kind`, `collection_id`) |
+| `GET` | `/v1/graph` | Nodes and edges in one snapshot |
+
+`GET /v1/graph` returns `{nodes, edges, workspace_id}` from a single pair of queries, so a graph
+view cannot render an edge whose node is missing because a second request had not arrived yet.
 
 ---
 
@@ -228,6 +292,35 @@ indexes exist (migration `0010`) but no route consumes them.
 
 ---
 
+### 3.6a AI (`/v1/ai`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/ai/chat` | Ask NEXUS; workspace in the body |
+| `POST` | `/v1/ai/stream` | Same, streamed as SSE |
+| `POST` | `/v1/ai/summarize` | Summarize pasted text or one source |
+
+`/ai/chat` accepts `question` as an alias for `message` (the spec's example uses `question`;
+the canonical route and the frontend use `message`). Exactly one must be present.
+
+`/ai/summarize` takes exactly one of `text` or `source_id`:
+
+```json
+{"workspace_id": "uuid", "text": "…", "style": "concise"}
+{"workspace_id": "uuid", "source_id": "uuid", "style": "concise"}
+```
+
+It generates on demand rather than returning `documents.summary`. That column is written by an
+enrichment job that may not have run yet, and is capped for list views — returning it here
+would be either empty or silently stale. It also does **not** persist its output: the stored
+summary is the job's, written under a version guard, and a second writer with different timing
+would race it.
+
+A `source_id` from another workspace is `404`, because it is resolved inside the authorised
+workspace rather than looked up by id alone.
+
+---
+
 ### 3.7 Chat
 
 #### `POST …/chat`
@@ -260,8 +353,10 @@ Response includes `grounded`, `citations[]`, `retrieval_debug` (only when `?debu
 | `POST` | `…/messages/{id}/feedback` | `{helpful: bool, reason?}` — the cheapest source of eval material |
 
 Conversations are created implicitly by the first chat message; there is no empty-conversation
-endpoint. Each citation in the transcript carries `source_kind`, `source_title`, `quote`, `page`,
-`heading_path` and `score`.
+endpoint. Each citation in the transcript carries `source_kind`, `source_title`, `filename`, `quote`,
+`page`, `heading_path` and `score`. `filename` is the uploaded file's name for document
+sources and the title for notes (which have no file), denormalised into `message_sources` at
+write time so a rename or delete cannot rewrite history.
 
 ---
 

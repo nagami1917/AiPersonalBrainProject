@@ -118,8 +118,9 @@ async def _persist_assistant_message(
         await conn.execute(
             """insert into public.message_sources
                  (workspace_id, message_id, chunk_id, source_kind, note_id, document_id,
-                  source_title, marker, quote, page, heading_path, relevance_score)
-               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                  source_title, source_filename, marker, quote, page, heading_path,
+                  relevance_score)
+               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
             workspace_id,
             message_id,
             citation.chunk_id,
@@ -127,6 +128,7 @@ async def _persist_assistant_message(
             citation.document_id if is_note else None,
             None if is_note else citation.document_id,
             citation.document_title,
+            citation.source_filename,
             citation.marker,
             citation.quote,
             citation.page,
@@ -154,6 +156,7 @@ def _to_out(citation: Citation) -> CitationOut:
         source_kind=citation.source_kind,  # type: ignore[arg-type]
         source_id=citation.document_id,
         source_title=citation.document_title,
+        filename=citation.source_filename,
         quote=citation.quote,
         page=citation.page,
         heading_path=citation.heading_path,
@@ -272,6 +275,7 @@ async def stream_answer(
                     "source_kind": s.source_kind,
                     "source_id": s.document_id,
                     "source_title": s.document_title,
+                    "filename": s.source_filename,
                     "page": s.page_number,
                     "heading_path": s.heading_path,
                 }

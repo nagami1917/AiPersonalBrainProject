@@ -15,6 +15,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import (
+    ai,
+    aliases,
+    auth,
     chat,
     collections,
     conversations,
@@ -81,10 +84,19 @@ def create_app() -> FastAPI:
         conversations,
         graph,
         jobs,
+        auth,
+        ai,
     ):
         app.include_router(module.router, prefix="/v1")
     app.include_router(collections.tags_router, prefix="/v1")
     app.include_router(conversations.messages_router, prefix="/v1")
+
+    # Flat, spec-shaped aliases. They resolve a workspace themselves (query
+    # parameter, defaulting to the caller's own) and delegate to the scoped
+    # handlers, so there is one implementation of each resource.
+    app.include_router(aliases.flat, prefix="/v1")
+    app.include_router(search.flat_router, prefix="/v1")
+    app.include_router(graph.flat_router, prefix="/v1")
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
