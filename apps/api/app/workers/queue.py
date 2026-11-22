@@ -35,7 +35,7 @@ where j.id = (
   for update skip locked
   limit 1
 )
-returning j.id, j.workspace_id, j.note_id, j.document_id, j.job_type,
+returning j.id, j.workspace_id, j.note_id, j.document_id, j.type,
           j.attempts, j.max_attempts, j.payload
 """
 
@@ -54,7 +54,7 @@ class Job:
     workspace_id: str
     note_id: str | None
     document_id: str | None
-    job_type: str
+    type: str
     attempts: int
     max_attempts: int
     payload: dict[str, Any]
@@ -81,7 +81,7 @@ class Job:
             workspace_id=str(record["workspace_id"]),
             note_id=str(record["note_id"]) if record["note_id"] else None,
             document_id=str(record["document_id"]) if record["document_id"] else None,
-            job_type=record["job_type"],
+            type=record["type"],
             attempts=record["attempts"],
             max_attempts=record["max_attempts"],
             payload=payload,
@@ -99,8 +99,9 @@ async def claim_job(conn: asyncpg.Connection) -> Job | None:
 
 async def mark_succeeded(conn: asyncpg.Connection, job_id: str) -> None:
     await conn.execute(
-        "update public.processing_jobs set status='succeeded', locked_by=null, locked_at=null "
-        "where id=$1",
+        """update public.processing_jobs
+           set status='succeeded', locked_by=null, locked_at=null, completed_at=now()
+           where id=$1""",
         job_id,
     )
 
@@ -110,7 +111,8 @@ async def mark_failed(conn: asyncpg.Connection, job: Job, error: str) -> None:
     if job.attempts >= job.max_attempts:
         await conn.execute(
             """update public.processing_jobs
-               set status='dead', locked_by=null, locked_at=null, last_error=$2
+               set status='dead', locked_by=null, locked_at=null,
+                   completed_at=now(), error_message=$2
                where id=$1""",
             job.id,
             error[:2000],
@@ -122,7 +124,7 @@ async def mark_failed(conn: asyncpg.Connection, job: Job, error: str) -> None:
     await conn.execute(
         """update public.processing_jobs
            set status='queued', locked_by=null, locked_at=null,
-               last_error=$2, run_after=now() + make_interval(secs => $3)
+               error_message=$2, run_after=now() + make_interval(secs => $3)
            where id=$1""",
         job.id,
         error[:2000],

@@ -58,7 +58,7 @@ class Source:
     document_title: str
     content: str
     heading_path: str | None = None
-    page_start: int | None = None
+    page_number: int | None = None
     char_start: int | None = None
     char_end: int | None = None
     score: float = 0.0
@@ -70,8 +70,8 @@ class Source:
             f'kind="{self.source_kind}"',
             f'title="{_escape_attr(self.document_title)}"',
         ]
-        if self.page_start:
-            attrs.append(f'page="{self.page_start}"')
+        if self.page_number:
+            attrs.append(f'page="{self.page_number}"')
         if self.heading_path:
             attrs.append(f'path="{_escape_attr(self.heading_path)}"')
         return f"<source {' '.join(attrs)}>\n{self.content}\n</source>"
@@ -157,7 +157,7 @@ def resolve_citations(
                 document_id=source.document_id,
                 document_title=source.document_title,
                 quote=_quote_from(source.content, quote_chars),
-                page=source.page_start,
+                page=source.page_number,
                 heading_path=source.heading_path,
                 score=round(source.score, 4),
                 source_kind=source.source_kind,

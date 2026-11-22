@@ -26,6 +26,10 @@ create unique index if not exists uq_entities_workspace_normalized
 create index if not exists idx_entities_workspace_type
   on public.knowledge_entities (workspace_id, entity_type);
 
+-- Target for the composite FKs below.
+alter table public.knowledge_entities
+  add constraint knowledge_entities_id_workspace_key unique (id, workspace_id);
+
 drop trigger if exists trg_entities_updated_at on public.knowledge_entities;
 create trigger trg_entities_updated_at
   before update on public.knowledge_entities
@@ -46,26 +50,51 @@ create table if not exists public.chunk_entities (
 create index if not exists idx_chunk_entities_entity on public.chunk_entities (entity_id);
 create index if not exists idx_chunk_entities_workspace on public.chunk_entities (workspace_id);
 
+-- A mention links a chunk and an entity that must both live in this workspace.
+-- Chunks are keyed on (id, workspace_id) in 0003; entities get their key above.
+alter table public.chunk_entities
+  drop constraint if exists chunk_entities_chunk_workspace_fkey,
+  add constraint chunk_entities_chunk_workspace_fkey
+    foreign key (chunk_id, workspace_id) references public.document_chunks (id, workspace_id)
+    on delete cascade,
+  drop constraint if exists chunk_entities_entity_workspace_fkey,
+  add constraint chunk_entities_entity_workspace_fkey
+    foreign key (entity_id, workspace_id) references public.knowledge_entities (id, workspace_id)
+    on delete cascade;
+
 -- ---------------------------------------------------------------------------
 -- knowledge_links — directed relations between entities
 -- ---------------------------------------------------------------------------
 create table if not exists public.knowledge_links (
   id               uuid primary key default gen_random_uuid(),
   workspace_id     uuid not null references public.workspaces(id) on delete cascade,
-  source_entity_id uuid not null references public.knowledge_entities(id) on delete cascade,
-  target_entity_id uuid not null references public.knowledge_entities(id) on delete cascade,
+  source_id        uuid not null references public.knowledge_entities(id) on delete cascade,
+  target_id        uuid not null references public.knowledge_entities(id) on delete cascade,
   relation         text not null default 'co_occurs'
                      check (char_length(btrim(relation)) between 1 and 80),
   weight           integer not null default 1 check (weight > 0),
   created_at       timestamptz not null default now(),
-  constraint knowledge_links_no_self_loop check (source_entity_id <> target_entity_id)
+  constraint knowledge_links_no_self_loop check (source_id <> target_id)
 );
 
 create unique index if not exists uq_knowledge_links_triple
-  on public.knowledge_links (workspace_id, source_entity_id, target_entity_id, relation);
+  on public.knowledge_links (workspace_id, source_id, target_id, relation);
 
-create index if not exists idx_knowledge_links_source on public.knowledge_links (source_entity_id);
-create index if not exists idx_knowledge_links_target on public.knowledge_links (target_entity_id);
+create index if not exists idx_knowledge_links_source on public.knowledge_links (source_id);
+create index if not exists idx_knowledge_links_target on public.knowledge_links (target_id);
+
+-- Both ends must be entities in the same workspace as the edge. Edges are the
+-- easiest place for a graph bug to leak data across tenants, because they join
+-- two rows rather than pointing at one.
+alter table public.knowledge_links
+  drop constraint if exists knowledge_links_source_workspace_fkey,
+  add constraint knowledge_links_source_workspace_fkey
+    foreign key (source_id, workspace_id) references public.knowledge_entities (id, workspace_id)
+    on delete cascade,
+  drop constraint if exists knowledge_links_target_workspace_fkey,
+  add constraint knowledge_links_target_workspace_fkey
+    foreign key (target_id, workspace_id) references public.knowledge_entities (id, workspace_id)
+    on delete cascade;
 
 -- ---------------------------------------------------------------------------
 -- Mention counter recomputation, kept in SQL so the graph cannot drift.

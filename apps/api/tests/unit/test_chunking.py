@@ -42,7 +42,7 @@ class TestChunking:
     def test_short_text_yields_one_chunk(self):
         chunks = chunk_text("A short but complete note about the deployment policy.")
         assert len(chunks) == 1
-        assert chunks[0].ordinal == 0
+        assert chunks[0].chunk_index == 0
 
     def test_deterministic_for_same_input(self):
         text = "\n\n".join(f"Paragraph {i} with some words in it." for i in range(40))
@@ -79,7 +79,7 @@ class TestChunking:
     def test_ordinals_are_contiguous_from_zero(self):
         text = "\n\n".join(f"Paragraph {i}." * 40 for i in range(10))
         chunks = chunk_text(text)
-        assert [c.ordinal for c in chunks] == list(range(len(chunks)))
+        assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
 
     def test_punctuation_free_text_still_respects_max_size(self):
         """Regression: a paragraph with no sentence boundaries (list/table dump)

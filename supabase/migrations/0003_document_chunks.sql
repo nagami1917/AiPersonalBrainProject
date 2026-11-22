@@ -28,12 +28,14 @@ create table if not exists public.document_chunks (
   note_id         uuid references public.notes(id) on delete cascade,
   document_id     uuid references public.documents(id) on delete cascade,
 
-  ordinal         integer not null check (ordinal >= 0),
+  chunk_index     integer not null check (chunk_index >= 0),
   content         text not null check (char_length(content) > 0),
   token_count     integer check (token_count is null or token_count > 0),
   char_start      integer check (char_start is null or char_start >= 0),
   char_end        integer check (char_end is null or char_end >= 0),
-  page_start      integer check (page_start is null or page_start >= 1),
+  -- page_number is the citation anchor a reader actually checks ("p. 4").
+  -- page_end is kept because a chunk may straddle a page break.
+  page_number     integer check (page_number is null or page_number >= 1),
   page_end        integer check (page_end is null or page_end >= 1),
   heading_path    text,
   embedding       vector(1536),
@@ -51,31 +53,50 @@ create table if not exists public.document_chunks (
     char_start is null or char_end is null or char_end >= char_start
   ),
   constraint document_chunks_page_range check (
-    page_start is null or page_end is null or page_end >= page_start
+    page_number is null or page_end is null or page_end >= page_number
   )
 );
 
+-- Workspace consistency for both possible parents, structurally. The XOR check
+-- guarantees the parent *column* is right; these guarantee the parent *row* is
+-- in the same workspace as the chunk. A chunk can therefore never be filed under
+-- workspace A while pointing at a note in workspace B.
+alter table public.document_chunks
+  drop constraint if exists document_chunks_note_workspace_fkey,
+  add constraint document_chunks_note_workspace_fkey
+    foreign key (note_id, workspace_id) references public.notes (id, workspace_id)
+    on delete cascade,
+  drop constraint if exists document_chunks_document_workspace_fkey,
+  add constraint document_chunks_document_workspace_fkey
+    foreign key (document_id, workspace_id) references public.documents (id, workspace_id)
+    on delete cascade;
+
 comment on constraint document_chunks_single_owner on public.document_chunks is
   'A chunk belongs to exactly one note or one document. Prevents orphaned chunks without a polymorphic FK.';
+
+-- Target for composite FKs from chunk_entities and message_sources: a child row
+-- can then prove it shares this chunk's workspace, not just its id.
+alter table public.document_chunks
+  add constraint document_chunks_id_workspace_key unique (id, workspace_id);
 
 comment on column public.document_chunks.workspace_id is
   'Denormalized from the parent so RLS and every retrieval filter avoid a join.';
 
 -- Idempotent reprocessing: one row per (parent, position, version). Two partial
 -- unique indexes because the parent column is nullable per row.
-create unique index if not exists uq_chunks_note_ordinal_version
-  on public.document_chunks (note_id, ordinal, version)
+create unique index if not exists uq_chunks_note_index_version
+  on public.document_chunks (note_id, chunk_index, version)
   where note_id is not null;
 
-create unique index if not exists uq_chunks_document_ordinal_version
-  on public.document_chunks (document_id, ordinal, version)
+create unique index if not exists uq_chunks_document_index_version
+  on public.document_chunks (document_id, chunk_index, version)
   where document_id is not null;
 
 create index if not exists idx_chunks_workspace_note
-  on public.document_chunks (workspace_id, note_id, ordinal);
+  on public.document_chunks (workspace_id, note_id, chunk_index);
 
 create index if not exists idx_chunks_workspace_document
-  on public.document_chunks (workspace_id, document_id, ordinal);
+  on public.document_chunks (workspace_id, document_id, chunk_index);
 
 -- keyword arm of hybrid search
 create index if not exists idx_chunks_fts

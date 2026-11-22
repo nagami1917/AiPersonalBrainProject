@@ -29,7 +29,7 @@ class Hit:
     source_title: str
     content: str
     heading_path: str | None
-    page_start: int | None
+    page_number: int | None
     char_start: int | None
     char_end: int | None
     vector_rank: int | None
@@ -54,7 +54,7 @@ def row_to_hit(row: Any) -> Hit:
         source_title=record["source_title"] or "Untitled",
         content=record["content"],
         heading_path=record.get("heading_path"),
-        page_start=record.get("page_start"),
+        page_number=record.get("page_number"),
         char_start=record.get("char_start"),
         char_end=record.get("char_end"),
         vector_rank=record.get("vector_rank"),
@@ -125,7 +125,7 @@ def to_sources(hits: Sequence[Hit]) -> list[Source]:
             document_title=hit.source_title,
             content=hit.content,
             heading_path=hit.heading_path,
-            page_start=hit.page_start,
+            page_number=hit.page_number,
             char_start=hit.char_start,
             char_end=hit.char_end,
             score=hit.fused_score,

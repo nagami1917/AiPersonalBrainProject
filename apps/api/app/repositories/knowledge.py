@@ -20,12 +20,12 @@ SourceKind = Literal["note", "document"]
 
 NOTE_COLUMNS = """
   id, title, status, processing_stage, collection_id, created_by,
-  summary, body, error_message, version, embedding_model, created_at, updated_at
+  summary, content, error_message, version, embedding_model, created_at, updated_at
 """
 
 DOCUMENT_COLUMNS = """
   id, title, status, processing_stage, collection_id, uploaded_by,
-  summary, mime_type, file_size, page_count, storage_path, raw_text,
+  summary, filename, mime_type, file_size, page_count, file_path, raw_text,
   error_message, version, embedding_model, created_at, updated_at
 """
 
@@ -79,15 +79,17 @@ async def list_notes(
 async def insert_note(conn: asyncpg.Connection, payload: dict[str, Any]) -> asyncpg.Record:
     return await conn.fetchrow(
         f"""insert into public.notes
-            (id, workspace_id, collection_id, created_by, title, body, status, metadata)
-            values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+            (id, workspace_id, collection_id, created_by, title, content, content_format,
+             status, metadata)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
             returning {NOTE_COLUMNS}""",
         payload["id"],
         payload["workspace_id"],
         payload.get("collection_id"),
         payload["created_by"],
         payload["title"],
-        payload.get("body", ""),
+        payload.get("content", ""),
+        payload.get("content_format", "markdown"),
         payload.get("status", "pending"),
         payload.get("metadata", {}),
     )
@@ -186,17 +188,18 @@ async def find_document_by_checksum(
 async def insert_document(conn: asyncpg.Connection, payload: dict[str, Any]) -> asyncpg.Record:
     return await conn.fetchrow(
         f"""insert into public.documents
-            (id, workspace_id, collection_id, uploaded_by, title, mime_type, storage_path,
-             file_size, checksum_sha256, raw_text, status, metadata)
-            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+            (id, workspace_id, collection_id, uploaded_by, title, filename, mime_type,
+             file_path, file_size, checksum_sha256, raw_text, status, metadata)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
             returning {DOCUMENT_COLUMNS}""",
         payload["id"],
         payload["workspace_id"],
         payload.get("collection_id"),
         payload["uploaded_by"],
         payload["title"],
+        payload["filename"],
         payload.get("mime_type"),
-        payload["storage_path"],
+        payload["file_path"],
         payload.get("file_size"),
         payload.get("checksum_sha256"),
         payload.get("raw_text"),
@@ -265,13 +268,13 @@ async def list_chunks(
         return []
     return list(
         await conn.fetch(
-            """select id, ordinal, content, heading_path, page_start, page_end,
+            """select id, chunk_index, content, heading_path, page_number, page_end,
                       char_start, char_end, token_count, note_id, document_id
                from public.document_chunks
                where workspace_id=$1
                  and ($2::uuid is null or note_id=$2::uuid)
                  and ($3::uuid is null or document_id=$3::uuid)
-               order by ordinal limit $4 offset $5""",
+               order by chunk_index limit $4 offset $5""",
             workspace_id,
             note_id,
             document_id,

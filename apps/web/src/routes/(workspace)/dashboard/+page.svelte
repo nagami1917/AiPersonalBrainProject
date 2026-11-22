@@ -123,7 +123,7 @@
         <ul class="space-y-1.5">
           {#each jobs as job (job.id)}
             <li class="flex items-center justify-between rounded-lg bg-ink-900/60 px-3 py-2 text-xs">
-              <span class="text-ink-300">{job.job_type}</span>
+              <span class="text-ink-300">{job.type}</span>
               <span
                 class="font-mono"
                 class:text-emerald-400={job.status === 'succeeded'}

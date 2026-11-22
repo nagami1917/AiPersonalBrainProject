@@ -13,10 +13,14 @@ create table if not exists public.processing_jobs (
   note_id       uuid references public.notes(id) on delete cascade,
   document_id   uuid references public.documents(id) on delete cascade,
 
-  job_type      text not null
-                  check (job_type in ('ingest_note','ingest_document','reindex','entities','summary','purge')),
+  type          text not null
+                  check (type in ('ingest_note','ingest_document','reindex','entities','summary','purge')),
+  -- 'pending' is accepted as an alias of 'queued' because the documented starter
+  -- schema uses it, and a job that is waiting to be claimed is the same thing
+  -- either way. The claim query treats both as claimable, so neither spelling
+  -- can strand work.
   status        text not null default 'queued'
-                  check (status in ('queued','running','succeeded','failed','dead','superseded')),
+                  check (status in ('pending','queued','running','succeeded','failed','dead','superseded')),
   priority      integer not null default 100,
   attempts      integer not null default 0 check (attempts >= 0),
   max_attempts  integer not null default 5 check (max_attempts >= 1),
@@ -24,7 +28,8 @@ create table if not exists public.processing_jobs (
   locked_by     text,
   locked_at     timestamptz,
   payload       jsonb not null default '{}'::jsonb,
-  last_error    text,
+  error_message text,
+  completed_at  timestamptz,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
 
@@ -35,7 +40,7 @@ create table if not exists public.processing_jobs (
 -- the claim query's only index: partial, ordered, small
 create index if not exists idx_jobs_claimable
   on public.processing_jobs (priority, run_after)
-  where status = 'queued';
+  where status in ('pending', 'queued');
 
 -- staleness sweeper: requeue workers that died mid-job
 create index if not exists idx_jobs_running_locked
@@ -105,7 +110,7 @@ begin
   end if;
 
   insert into public.processing_jobs
-    (workspace_id, job_type, note_id, document_id, payload, priority, run_after)
+    (workspace_id, type, note_id, document_id, payload, priority, run_after)
   values
     (p_workspace_id, p_job_type, p_note_id, p_document_id,
      coalesce(p_payload, '{}'::jsonb), p_priority, p_run_after)

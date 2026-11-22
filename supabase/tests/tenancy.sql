@@ -46,14 +46,14 @@ declare alice_ws uuid;
 begin
   select id into alice_ws from public.workspaces where owner_id = 'aaaaaaaa-1111-1111-1111-111111111111';
   if not exists (select 1 from public.notes where workspace_id=alice_ws and title='Secrets policy') then
-    insert into public.notes (workspace_id, created_by, title, body, status, embedding_model)
+    insert into public.notes (workspace_id, created_by, title, content, status, embedding_model)
     values (alice_ws, 'aaaaaaaa-1111-1111-1111-111111111111',
             'Secrets policy', 'Service role key lives in Fly secrets only.', 'ready', 'text-embedding-3-small');
   end if;
   if not exists (select 1 from public.documents where workspace_id=alice_ws and title='thesis.pdf') then
-    insert into public.documents (workspace_id, uploaded_by, title, storage_path, mime_type, status, embedding_model, raw_text)
+    insert into public.documents (workspace_id, uploaded_by, title, filename, file_path, mime_type, status, embedding_model, raw_text)
     values (alice_ws, 'aaaaaaaa-1111-1111-1111-111111111111',
-            'thesis.pdf', alice_ws || '/d1/thesis.pdf', 'application/pdf', 'ready',
+            'thesis.pdf', 'thesis.pdf', alice_ws || '/d1/thesis.pdf', 'application/pdf', 'ready',
             'text-embedding-3-small', 'Fly secrets are set with flyctl.');
   end if;
 end $$;
@@ -79,7 +79,7 @@ declare alice_ws uuid; n int;
 begin
   select id into alice_ws from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111';
   begin
-    insert into public.notes (workspace_id, created_by, title, body, status, embedding_model)
+    insert into public.notes (workspace_id, created_by, title, content, status, embedding_model)
     values (alice_ws, 'cccccccc-3333-3333-3333-333333333333','viewer sneaks in','x','ready','text-embedding-3-small');
     raise notice 'SECURITY FAILURE: viewer inserted a note';
   exception when others then
@@ -111,14 +111,14 @@ declare ws uuid;
 begin
   select id into ws from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111';
   begin
-    insert into public.document_chunks (workspace_id, ordinal, content, embedding_model)
+    insert into public.document_chunks (workspace_id, chunk_index, content, embedding_model)
     values (ws, 0, 'orphan chunk', 'text-embedding-3-small');
     raise notice 'SECURITY FAILURE: chunk with no parent accepted';
   exception when check_violation then
     raise notice 'correctly rejected parentless chunk';
   end;
   begin
-    insert into public.document_chunks (workspace_id, note_id, document_id, ordinal, content, embedding_model)
+    insert into public.document_chunks (workspace_id, note_id, document_id, chunk_index, content, embedding_model)
     values (ws,
             (select id from public.notes where workspace_id=ws limit 1),
             (select id from public.documents where workspace_id=ws limit 1),
@@ -135,11 +135,11 @@ do $$
 declare ws uuid;
 begin
   select id into ws from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111';
-  insert into public.document_chunks (workspace_id, document_id, ordinal, content, embedding_model)
+  insert into public.document_chunks (workspace_id, document_id, chunk_index, content, embedding_model)
   values (ws, (select id from public.documents where workspace_id=ws limit 1), 90,
           'Fly secrets are set with flyctl secrets set', 'text-embedding-3-small')
   on conflict do nothing;
-  insert into public.document_chunks (workspace_id, note_id, ordinal, content, embedding_model)
+  insert into public.document_chunks (workspace_id, note_id, chunk_index, content, embedding_model)
   values (ws, (select id from public.notes where workspace_id=ws limit 1), 90,
           'The service role key lives in Fly secrets only', 'text-embedding-3-small')
   on conflict do nothing;
@@ -159,3 +159,100 @@ from public.hybrid_search(
   p_workspace_id => (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
   p_query => 'fly secrets'
 );
+
+\echo ''
+\echo '== workspace-consistency constraints: cross-tenant rows are refused by the DATABASE =='
+\echo '   (these hold even for a service-role connection, where RLS does not apply)'
+\set ON_ERROR_STOP 0
+
+\echo '-- expected: ERROR foreign key — chunk in ws A pointing at a note in ws B'
+begin;
+insert into public.document_chunks (workspace_id, note_id, chunk_index, content, embedding_model)
+values (
+  (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
+  (select id from public.notes where workspace_id =
+     (select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111') limit 1),
+  991, 'smuggled chunk', 'text-embedding-3-small');
+rollback;
+
+\echo '-- expected: ERROR foreign key — note in A tagged with a tag from B'
+begin;
+with tag_b as (
+  insert into public.tags (workspace_id, name)
+  values ((select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
+          'bob-workspace-tag')
+  on conflict do nothing returning id)
+insert into public.note_tags (note_id, tag_id, workspace_id)
+values (
+  (select id from public.notes where workspace_id =
+     (select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111') limit 1),
+  (select id from tag_b),
+  (select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111'));
+rollback;
+
+\echo '-- expected: ERROR foreign key — knowledge_link across two workspaces'
+begin;
+with a as (
+  insert into public.knowledge_entities (workspace_id, name, normalized_name)
+  values ((select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111'),
+          'RLS Alpha', 'rls alpha')
+  on conflict (workspace_id, normalized_name) do update set name = excluded.name
+  returning id),
+b as (
+  insert into public.knowledge_entities (workspace_id, name, normalized_name)
+  values ((select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
+          'RLS Beta', 'rls beta')
+  on conflict (workspace_id, normalized_name) do update set name = excluded.name
+  returning id)
+insert into public.knowledge_links (workspace_id, source_id, target_id, relation)
+select (select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111'),
+       (select id from a), (select id from b), 'smuggled';
+rollback;
+
+\echo '-- expected: ERROR foreign key — citation joining a message in A to a chunk in B'
+begin;
+-- Give Bob a real note and chunk first, so the only thing wrong with the
+-- citation below is the workspace mismatch. (A NULL or parentless chunk would
+-- "fail" for the wrong reason and prove nothing.)
+insert into public.notes (workspace_id, created_by, title, content, status, embedding_model)
+select (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
+       'bbbbbbbb-2222-2222-2222-222222222222', 'Bob citation target',
+       'Bob text', 'ready', 'text-embedding-3-small'
+where not exists (
+  select 1 from public.notes where title = 'Bob citation target');
+
+insert into public.document_chunks (workspace_id, note_id, chunk_index, content, embedding_model)
+select (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
+       (select id from public.notes where workspace_id =
+          (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222') limit 1),
+       980, 'Bob chunk used as a cross-tenant citation target', 'text-embedding-3-small'
+where not exists (
+  select 1 from public.document_chunks where chunk_index = 980 and content like 'Bob chunk%');
+
+with c as (
+  insert into public.conversations (workspace_id, created_by, title)
+  values ((select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111'),
+          'aaaaaaaa-1111-1111-1111-111111111111', 'smuggle attempt')
+  returning id),
+m as (
+  insert into public.chat_messages (workspace_id, conversation_id, role, content)
+  select (select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111'),
+         id, 'assistant', 'x' from c returning id)
+insert into public.message_sources
+  (workspace_id, message_id, chunk_id, source_kind, note_id, source_title, marker)
+select (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222'),
+       m.id,
+       (select id from public.document_chunks where workspace_id =
+          (select id from public.workspaces where owner_id='bbbbbbbb-2222-2222-2222-222222222222') limit 1),
+       'note',
+       (select id from public.notes where workspace_id =
+          (select id from public.workspaces where owner_id='aaaaaaaa-1111-1111-1111-111111111111') limit 1),
+       'smuggled', 1
+from m;
+rollback;
+
+\set ON_ERROR_STOP 1
+
+\echo ''
+\echo '   All four statements above MUST have errored. A row that inserted'
+\echo '   successfully is a missing composite foreign key.'

@@ -105,7 +105,7 @@ Request a signed upload target. The API validates type/size and reserves the pat
 // 200
 {
   "document_id": "uuid",          // pre-allocated; client echoes it on confirm
-  "storage_path": "{workspace_id}/doc_…/thesis.pdf",
+  "file_path": "{workspace_id}/doc_…/thesis.pdf",
   "upload_url": "https://…",       // signed, 5-minute TTL, PUT
   "expires_at": "2026-11-22T12:35:00Z"
 }
@@ -120,6 +120,7 @@ Confirm an upload and enqueue ingestion.
 {
   "document_id": "uuid",           // must match the id from upload-url
   "title": "Master's Thesis",
+  "filename": "thesis.pdf",        // the user's name for the file
   "collection_id": "uuid|null",
   "tags": ["research", "ml"]
 }
@@ -164,10 +165,10 @@ search ranking and both can be cited.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `…/notes` | Create from `{title, body, collection_id, tags}` → enqueues `ingest_note`, returns `202` with `{note, job_id}` |
+| `POST` | `…/notes` | Create from `{title, content, content_format?, collection_id, tags}` → enqueues `ingest_note`, returns `202` with `{note, job_id}` |
 | `GET` | `…/notes` | List; filters `status`, `collection_id`, `limit`, `cursor` |
-| `GET` | `…/notes/{id}` | Full note incl. `body`, `summary`, tags, `chunk_count` |
-| `PATCH` | `…/notes/{id}` | Edit `title`/`body`/`collection_id`/`tags`. A body edit bumps `version` and enqueues a re-index |
+| `GET` | `…/notes/{id}` | Full note incl. `content`, `content_format`, `summary`, tags, `chunk_count` |
+| `PATCH` | `…/notes/{id}` | Edit `title`/`content`/`collection_id`/`tags`. A content edit bumps `version` and enqueues a re-index |
 | `DELETE` | `…/notes/{id}` | Soft delete + enqueue `purge`; chunks removed immediately |
 | `GET` | `…/notes/{id}/status` | Same shape as document status |
 | `POST` | `…/notes/{id}/reprocess` | Force re-chunk + re-embed |

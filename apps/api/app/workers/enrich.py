@@ -31,7 +31,7 @@ def _table(kind: str) -> str:
 
 
 def _text_column(kind: str) -> str:
-    return "body" if kind == "note" else "raw_text"
+    return "content" if kind == "note" else "raw_text"
 
 
 async def _load_source(

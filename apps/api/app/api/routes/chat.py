@@ -167,7 +167,7 @@ async def get_conversation(
     )
     sources = await conn.fetch(
         """select message_id, marker, chunk_id, source_kind, source_title,
-                  quote, page, heading_path, score
+                  quote, page, heading_path, relevance_score
            from public.message_sources
            where workspace_id=$1
              and message_id = any($2::uuid[])
@@ -187,7 +187,7 @@ async def get_conversation(
                 "quote": src["quote"],
                 "page": src["page"],
                 "heading_path": src["heading_path"],
-                "score": src["score"],
+                "score": src["relevance_score"],
             }
         )
 
