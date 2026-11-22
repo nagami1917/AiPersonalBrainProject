@@ -17,16 +17,30 @@ from app.core.errors import ProviderUnavailable
 
 
 def _sign(settings: Settings, path: str, expires_in: int) -> dict[str, Any]:
-    response = httpx.post(
-        f"{settings.supabase_url}/storage/v1/object/sign/{settings.storage_bucket}/{path}",
-        headers={
-            "Authorization": f"Bearer {settings.supabase_service_role_key}",
-            "apikey": settings.supabase_service_role_key,
-        },
-        json={"expiresIn": expires_in},
-        timeout=20,
-    )
+    """Ask Storage to sign a path.
+
+    A transport failure is a 503, not a 500. `httpx` raises on connection errors
+    by default, and letting that escape the handler produces an unhandled
+    exception: the client learns "something broke" with no retry guidance, and
+    the error envelope the rest of the API guarantees is not the one it gets.
+    Storage being unreachable is exactly `ProviderUnavailable`.
+    """
+    try:
+        response = httpx.post(
+            f"{settings.supabase_url}/storage/v1/object/sign/{settings.storage_bucket}/{path}",
+            headers={
+                "Authorization": f"Bearer {settings.supabase_service_role_key}",
+                "apikey": settings.supabase_service_role_key,
+            },
+            json={"expiresIn": expires_in},
+            timeout=20,
+        )
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable("Storage is unreachable") from exc
+
     if response.status_code >= 400:
+        # The response body can contain a signed fragment or bucket internals;
+        # the status is enough to debug and cannot leak.
         raise ProviderUnavailable("Could not create a signed URL for storage")
     payload: dict[str, Any] = response.json()
     return payload

@@ -22,27 +22,35 @@ class OpenAIChat:
         self.model = settings.llm_model
 
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._settings.openai_base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._settings.openai_api_key}"},
-                json={
-                    "model": self.model,
-                    "temperature": self._settings.llm_temperature,
-                    "max_tokens": self._settings.llm_max_output_tokens,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                },
-                timeout=90,
-            )
-            if response.status_code >= 500 or response.status_code == 429:
-                raise ProviderUnavailable("LLM provider unavailable")
-            response.raise_for_status()
-            body: dict[str, Any] = response.json()
-            content: str = body["choices"][0]["message"]["content"]
-            return content
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self._settings.openai_base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self._settings.openai_api_key}"},
+                    json={
+                        "model": self.model,
+                        "temperature": self._settings.llm_temperature,
+                        "max_tokens": self._settings.llm_max_output_tokens,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                    },
+                    timeout=90,
+                )
+                if response.status_code >= 500 or response.status_code == 429:
+                    raise ProviderUnavailable("LLM provider unavailable")
+                response.raise_for_status()
+                body: dict[str, Any] = response.json()
+                content: str = body["choices"][0]["message"]["content"]
+                return content
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            # A refused connection or a malformed body is "the provider did not
+            # answer", which is a 503 the client can retry — not an unhandled
+            # exception behind a 500 with a traceback in the log. KeyError and
+            # ValueError cover a 200 whose body is not the shape we expect, which
+            # happens during provider incidents.
+            raise ProviderUnavailable("LLM provider unavailable") from exc
 
     async def stream(self, system: str, user: str) -> AsyncIterator[str]:
         client = httpx.AsyncClient(timeout=120)

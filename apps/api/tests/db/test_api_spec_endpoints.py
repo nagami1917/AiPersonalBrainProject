@@ -400,8 +400,17 @@ class TestAiSummarize:
         workspace = await _workspace_of(ALICE)
         pool = await asyncpg.create_pool(get_settings().database_url, min_size=1, max_size=1)
         try:
+            # Two predicates, both learned from real failures: other tests
+            # soft-delete documents in this shared database, and a document with
+            # no extracted text has nothing to summarize (a 404 by design).
+            # "any row" made this test depend on run order.
             doc_id = await pool.fetchval(
-                "select id from public.documents where workspace_id=$1 limit 1", workspace
+                """select id from public.documents
+                   where workspace_id=$1 and deleted_at is null
+                     and coalesce(raw_text, '') <> ''
+                   order by created_at
+                   limit 1""",
+                workspace,
             )
         finally:
             await pool.close()

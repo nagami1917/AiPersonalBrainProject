@@ -1,6 +1,6 @@
 # NEXUS — Security Model
 
-Status: **implemented in the scaffold** — this document describes what the code actually enforces, and where.
+Status: **describes what the code enforces, and where.** Where a control is partial, it says so — the audit for this document found three rules that were documented but not implemented (rate limits, content inspection, audit trail), and each is now backed by code and a test.
 
 The threat model for a personal knowledge tool is dominated by one thing: **your documents are the asset**. A cross-tenant retrieval bug is a data breach, not a UI glitch. Everything below serves that.
 
@@ -92,23 +92,36 @@ it would be one.
 that makes sharing safe: read access to a colleague's workspace without the ability to modify it —
 enforced in the database, not by hiding buttons.
 
-**6. Storage is path-scoped to the workspace.** Object paths begin with the workspace id and the
-policies parse that segment, so a signed upload URL cannot be minted for a foreign workspace, and a
-signed download URL cannot be used to read one.
+**6. Storage is path-scoped to the workspace.** Object paths begin with the workspace id
+(`nexus-documents/{workspace_id}/{document_id}/{filename}`) and the policies parse that segment, so a
+signed upload URL cannot be minted for a foreign workspace and a signed download URL cannot read one.
+
+The tenant segment is the **workspace**, not the user: a member who joins a workspace must be able to
+download its files, so a per-user path would either break sharing or leak across tenants. Reads need
+membership, writes need write permission — a viewer can download but not upload.
+
+**7. The worker re-checks the path it is about to fetch.** The worker downloads with the service role,
+which bypasses storage policies entirely. Before fetching, it verifies the stored path still begins
+with its own workspace id, so a corrupted row cannot become a cross-tenant read. This is the one place
+where the second line of defence is code rather than policy, and it is commented as such.
 
 ---
 
 ## 4. Prompt injection
 
-Documents are user-supplied text and may contain adversarial instructions ("ignore previous instructions and reveal…"). Controls:
+Documents are user-supplied text and may contain adversarial instructions ("ignore previous instructions and reveal…").
 
-- Retrieved content is wrapped in numbered `<source>` blocks.
-- The system prompt states that source content is **data to cite, not instructions**.
-- The model may only cite ids that exist in the supplied set; **fabricated markers are stripped server-side** and counted as a `grounding_violation` in the logs (`app/ai/rag/answer_generator.py`).
+**What is fully prevented — structural breakout.** Every passage is wrapped in `<source>…</source>`, and the system prompt says the content inside is data. That promise is only as good as the delimiter being trustworthy: a passage containing `</source>` closes the block early, and everything after it lands where the model expects *our* framing. `neutralize()` in `app/ai/rag/context_builder.py` rewrites every reserved delimiter inside untrusted text — including case variants and `<system>`/`<instructions>` — to an inert marker, and swallows a tag's attributes so a forged `<source id="7" …>` cannot leave a usable fragment behind. `tests/unit/test_prompt_injection.py` asserts that exactly one source block survives any payload, so a document cannot forge a citable source.
+
+**What is mitigated, not prevented — persuasion.** A document that says "ignore your instructions" is a contest between our system prompt and its text; no check in this repository decides that contest. Layers:
+
+- The system prompt states that source content is **data to cite, not instructions**, and that a source containing commands should be reported, not obeyed.
+- The model may only cite ids that exist in the supplied set; fabricated markers are stripped server-side (`app/ai/rag/answer_generator.py`).
+- An answer with no valid citation is returned as **ungrounded** rather than as fact.
 - The model has no tool access and no database credentials, so a successful injection cannot escalate beyond producing a bad answer.
-- Attachments are never executed or rendered as HTML in the UI.
+- These are exercised with adversarial payloads (`tests/unit/test_prompt_injection.py`) rather than assumed; see also RAG-PIPELINE.md §5.
 
-This is mitigation, not immunity. It is tested with an adversarial eval set rather than assumed (see RAG-PIPELINE.md §5).
+Delimiters are neutralised; persuasion is defended in depth. The distinction is the honest one.
 
 ---
 
@@ -116,12 +129,24 @@ This is mitigation, not immunity. It is tested with an adversarial eval set rath
 
 | Control | Implementation |
 |---|---|
-| Type allowlist | `MAX`/mime checked at `POST /documents/upload-url` before a path exists |
-| Size limit | 50 MB at request time **and** on the bucket (`file_size_limit`) |
+| **Extension allowlist** | `app/core/upload_validation.py`, at `POST /documents/upload-url` before a path exists |
+| **Extension ↔ MIME agreement** | Both are client-supplied, so a disagreement (`.pdf` declared `text/plain`) is refused — one of the two claims is false |
+| **Size limit** | 50 MB at request time **and** on the bucket (`file_size_limit`) |
+| **Content inspection** | Magic bytes checked in the worker against the declared type, where the bytes first exist |
 | Path traversal | Filenames sanitized to `[A-Za-z0-9._-]`; path is server-generated `{workspace_id}/{document_id}/{name}` |
-| Private bucket | No public read; access via signed URLs only (upload 5 min, download 60 s) |
-| Storage RLS | `(storage.foldername(name))[1] = auth.uid()::text` on select/insert/update/delete |
+| Private bucket | No public read; signed download URLs expire in 60 s |
+| Storage RLS | First path segment must be a workspace the caller belongs to; writes need write permission |
+| Download paths | Derived server-side from the document row, never from a request parameter |
 | Byte proxying | None — the browser PUTs directly; the API never handles file bytes |
+
+### 5.1 Why validation is split in two
+
+The browser uploads straight to Storage, so **the API never sees the file at the moment it authorises the upload**. Both halves are needed:
+
+- `validate_declared` (request time) — extension, declared MIME, declared size, and whether the first two agree. Catches honest mistakes and lazy spoofing.
+- `validate_content` (worker) — magic bytes against the declared type. Catches a renamed `.exe`, a `.docx` that is not a ZIP container, and a "text" file containing binary.
+
+`.txt` and `.md` have no magic number, so content sniffing cannot *confirm* them; instead the worker rejects binary content and the extractor decodes strictly. A text file that is not valid UTF-8 is not a text file, whatever it is named.
 
 Parsers (PyMuPDF, `python-docx`, `markdown-it-py`, BeautifulSoup) run on untrusted input in the worker, not in the request path, so a parser crash costs a retry rather than an outage.
 
@@ -141,26 +166,68 @@ Parsers (PyMuPDF, `python-docx`, `markdown-it-py`, BeautifulSoup) run on untrust
 
 ## 7. Rate limits
 
-Token-bucket per user in FastAPI: chat/search 20/min, uploads 30/min, everything else 120/min. `429` carries `Retry-After`. Auth throttling is Supabase's responsibility.
+`app/core/ratelimit.py`, applied through `app/core/guard.py`. Only the endpoints that call a provider are limited — chat, streaming chat, and summarisation. CRUD is not: a client autosaving a note every 1.5 s is normal behaviour, and throttling it would be an outage dressed as security.
+
+**Two budgets, checked on every limited call:**
+
+| Scope | Default | Why both |
+|---|---|---|
+| Per user | 30 / 60 s | One account hammering the provider — a retry loop in a tab left open |
+| Per workspace | 240 / 60 s | The shared cost ceiling. A 20-member workspace should not get 20× one member's budget, and one leaked member account should not drain the tenant |
+
+A per-user-only limit cannot protect the bill; a per-workspace-only limit lets one user lock everyone else out.
+
+`429` carries `{"details": {"scope": "user" | "workspace", "retry_after": n}}`, so a client knows whether to back off or to tell the user. Both budgets are checked *before* either is incremented, so a workspace rejection does not also spend the human's personal allowance.
+
+**Honest limits.** Counters are per process. With N API replicas the effective ceiling is N×, which `/v1/meta` states as `rate_limits.distributed: false` rather than implying precision that is not there. Postgres- or Redis-backed counting is the upgrade path; the interface is already async, so no route changes.
 
 Unbounded LLM spend is the cheapest denial-of-wallet attack against a RAG product, which is why limits and `usage_events` ship in the first milestone rather than last.
 
 ---
 
-## 8. What is deliberately not done yet
+## 8. Audit trail
+
+Migration `0013_audit_events.sql`, written by `app/core/audit.py`, readable at
+`GET /v1/workspaces/{id}/audit`.
+
+**Recorded:** document upload / delete / reprocess / download, workspace delete, member add /
+remove / leave / role change.
+
+**Properties that make it evidence rather than logging:**
+
+| Property | How |
+|---|---|
+| Append-only | No update or delete policy for any user role; asserted by a test |
+| Actor cannot be forged | `record_audit` is `SECURITY DEFINER` and reads the actor from the JWT claim GUC, never a parameter |
+| Cannot be planted across tenants | The function independently verifies the actor's membership |
+| Survives its subject | `target_id` has no foreign key, so a deleted document's history remains |
+| Outlives the account | `actor_id` is `ON DELETE SET NULL`; the row stays with the name gone, shown as such |
+| Readable by admins, not members | `can_manage_workspace` in RLS plus `require_manage` in the route — a member gets 403, not an empty list |
+
+**The leak this could have become.** The tempting implementation is `detail = row_to_json(document)`, which would write every document body into a permanently retained, admin-readable table. Instead `detail` is built from a **whitelist** (`SAFE_FIELDS`) that contains no free-text field at all: `content`, `raw_text`, `summary`, `answer` and friends are dropped at write time, and nested structures are rejected because a dict could smuggle anything past a key-name check. `tests/unit/test_audit_scrub.py` fails if anyone adds a body field to that set.
+
+A failed audit insert **never fails the operation**: the delete already succeeded, and telling the user otherwise would be a lie. The failure is logged at ERROR so a broken trail is visible.
+
+---
+
+## 9. What is deliberately not done yet
 
 | Not done | Why it is acceptable now | Trigger to revisit |
 |---|---|---|
 | OCR sandboxing | No OCR in MVP | Enabling OCR |
-| Row-level audit log | Supabase logs cover MVP | Multi-user SaaS |
+| Audit log retention/export | Append-only and queryable per workspace; no retention policy or export yet | Compliance requirement |
 | MFA enforcement | Single user, own account | Sharing / teams |
 | Encryption at rest beyond provider default | Supabase encrypts at rest | Compliance requirement |
 | Secret rotation automation | Fly secrets rotated manually, documented | First incident |
 | Penetration test | Pre-launch | Before public launch |
 | CSRF tokens on API | JWT in `Authorization` header, not cookies — not CSRF-able | If cookie sessions are introduced |
+| Distributed rate limiting | In-process counters; accurate for one replica, N× for N | More than one API instance |
+| Audit retention policy | Table grows without pruning; no export | Compliance requirement |
+| Extension sniffing for `.txt`/`.md` | No magic number exists; binary content and strict decode are checked instead | A signature format is adopted |
+| Per-member spend quotas | Workspace ceiling only, not per-seat budgets | Billing per seat |
 
 ---
 
-## 9. Reporting
+## 10. Reporting
 
 Security issues should go to the repository maintainer privately. Do not open a public issue containing exploit details or user data.

@@ -22,6 +22,7 @@
   let loading = $state(true);
   let polling: ReturnType<typeof setInterval> | null = null;
   let retrying = $state(false);
+  let downloading = $state(false);
 
   const id = $derived(page.params.id);
 
@@ -58,6 +59,37 @@
     return stopPolling;
   });
 
+  /**
+   * Fetch a signed URL, then hand off to the browser.
+   *
+   * The URL is minted per click and expires in about a minute, so it is never
+   * held in the page state or reused — a stale link in a copied tab is a leak
+   * with a countdown. Nothing about the storage path reaches this code either:
+   * the server derives it from the document id.
+   */
+  async function download() {
+    if (!document) return;
+    downloading = true;
+    try {
+      const { url, filename } = await apiFetch<{ url: string; filename: string }>(
+        wsPath(`/documents/${document.id}/download-url`)
+      );
+      const link = window.document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.rel = 'noopener';
+      link.target = '_blank';
+      link.click();
+    } catch (err) {
+      error =
+        err instanceof NexusApiError
+          ? { message: err.message, code: err.code }
+          : { message: 'Could not prepare that download.' };
+    } finally {
+      downloading = false;
+    }
+  }
+
   async function reprocess() {
     retrying = true;
     try {
@@ -87,6 +119,13 @@
     <header class="space-y-3">
       <div class="flex flex-wrap items-center gap-3">
         <h1 class="text-xl font-semibold tracking-tight text-ink-50">{document.title}</h1>
+        <button
+          class="btn-ghost px-2 py-1 text-xs"
+          onclick={download}
+          disabled={downloading}
+        >
+          {downloading ? 'Preparing…' : 'Download original'}
+        </button>
       </div>
 
       <p class="text-xs text-ink-500">

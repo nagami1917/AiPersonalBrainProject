@@ -109,7 +109,14 @@ def create_app() -> FastAPI:
     @app.get("/v1/meta", tags=["meta"])
     async def meta() -> dict[str, object]:
         """Capability document: the frontend reads limits from here instead of
-        hardcoding them (API.md §3.1)."""
+        hardcoding them (API.md §3.1).
+
+        Rate limits are published because a 429 with no stated budget is a
+        mystery to the client: it cannot back off sensibly or explain itself. The
+        value is the honest one — a single-process counter — and
+        `rate_limit_distributed: false` says so rather than implying a precision
+        the implementation does not have.
+        """
         return {
             "version": settings.api_version,
             "supported_mime_types": list(settings.allowed_mime_types),
@@ -118,6 +125,13 @@ def create_app() -> FastAPI:
             "embedding_dim": settings.pinned_embedding_dim,
             "llm_model": settings.llm_model,
             "retrieval_k": settings.retrieval_k,
+            "rate_limits": {
+                "enabled": settings.rate_limit_enabled,
+                "window_seconds": settings.rate_limit_window_seconds,
+                "per_user_ai_calls": settings.rate_limit_user_calls,
+                "per_workspace_ai_calls": settings.rate_limit_workspace_calls,
+                "distributed": False,
+            },
         }
 
     return app

@@ -41,7 +41,7 @@ Base URL: `https://api.nexus.app` (Fly.io) · all paths under `/v1`
 | 409 | `duplicate_document` | Checksum already ingested |
 | 413 | `file_too_large` | Over 50 MB |
 | 422 | `quota_exceeded`, `unprocessable_document` | Valid request, cannot be fulfilled |
-| 429 | `rate_limited` | Includes `Retry-After` |
+| 429 | `rate_limited` | `details.scope` and `details.retry_after` |
 | 502/503 | `provider_unavailable` | LLM/embedding provider down |
 
 `404` vs `403` policy: a workspace the caller is not a member of, and any resource inside it, returns `404` — membership is not disclosed. `403` is reserved for a caller who *is* in the workspace but whose role forbids the action, because that distinction is useful to them and leaks nothing.
@@ -148,6 +148,7 @@ The tenant root. A user always has at least one — the personal workspace creat
 | `POST` | `…/members` | `{email, role}` — adds an **existing** account; `404 user_not_found` otherwise |
 | `PATCH` | `…/members/{user_id}` | Change role; the owner's role cannot be changed |
 | `DELETE` | `…/members/{user_id}` | Remove a member, or leave; the owner cannot be removed |
+| `GET` | `…/audit` | Sensitive-operation log — `admin` or above; see §4.2 |
 
 Roles are `owner | admin | member | viewer`. `owner` is unique per workspace (partial unique
 index). Email invitations are deliberately not implemented — the endpoint adds a known account by
@@ -214,6 +215,9 @@ Paginated chunk preview with offsets and `heading_path` — the debugging and ci
 
 #### `GET …/documents/{id}/status`
 Lightweight polling target for the ingest progress UI: `{id, kind, status, processing_stage, progress_pct, error_message}`. Notes expose the same shape at `…/notes/{id}/status`, so one poller serves both.
+
+#### `GET …/documents/{id}/download-url`
+Signed URL for the original upload, expiring in 60 s. Path derived server-side; see §4.1.
 
 ---
 
@@ -446,13 +450,62 @@ exposed.
 
 Per user, token-bucket, enforced in FastAPI (Redis optional later):
 
-| Bucket | Limit |
-|---|---|
-| Chat / search | 20 req/min, 300 req/hour |
-| Uploads | 30 req/min |
-| Everything else | 120 req/min |
+Only endpoints that call a model provider are limited. CRUD is not — autosave every 1.5 s is normal
+client behaviour, and throttling it would look like an outage.
 
-`429` carries `Retry-After` and a `X-RateLimit-*` header set. Auth endpoints are Supabase's responsibility.
+| Scope | Default | Applies to |
+|---|---|---|
+| Per user | 30 / 60 s | `POST …/chat`, `…/chat/stream`, `POST /ai/chat`, `/ai/stream`, `/ai/summarize` |
+| Per workspace | 240 / 60 s | the same set, counted across all members |
+
+Both budgets are checked on every call, because they fail differently: a per-user limit alone cannot
+protect the bill, and a per-workspace limit alone lets one member lock out everyone else. Chat and
+summarise have *separate* pools, so alternating endpoints cannot multiply an allowance.
+
+```json
+{ "error": { "code": "rate_limited",
+             "message": "You are making requests faster than this endpoint allows. Wait a moment and try again.",
+             "details": { "scope": "user", "retry_after": 15 },
+             "request_id": "req_…" } }
+```
+
+`details.scope` distinguishes your own traffic from a busy workspace. Limits are per process, and
+`GET /v1/meta` reports them under `rate_limits` with `distributed: false` rather than implying a
+precision the implementation does not have. Auth endpoints are Supabase's responsibility.
+
+---
+
+## 4.1 Document download
+
+```
+GET /v1/workspaces/{workspace_id}/documents/{document_id}/download-url
+→ 200 { url, expires_at, filename, mime_type }
+```
+
+Returns a **short-lived** signed URL (60 s by default). The storage path is derived from the document
+row, never accepted from the request — so there is no parameter to point at another workspace's
+object. The document's own `file_path` is *not* returned by `GET /documents/{id}`: no screen needs it,
+and it is exactly the value a path-manipulation attempt wants.
+
+---
+
+## 4.2 Audit trail
+
+```
+GET /v1/workspaces/{workspace_id}/audit?limit=50&before=<iso>&action=<prefix>&target_id=<uuid>
+→ { items: [{ id, action, target_type, target_id, target_label, detail,
+              actor_id, actor_name, request_id, created_at }],
+    next_cursor }
+```
+
+Admin-only: `403` for a member, `404` for a non-member. Keyset pagination on `created_at` — an audit
+view must not skip rows under concurrent writes, which `OFFSET` would.
+
+Recorded actions: `document.upload`, `document.delete`, `document.reprocess`, `document.download`,
+`workspace.delete`, `workspace.member.add`, `.remove`, `.leave`, `.role_change`.
+
+`detail` is a JSON **object** built from a whitelist that contains no document or note text. `actor_id`
+is `null` when the account has since been deleted, and the event remains.
 
 ---
 
