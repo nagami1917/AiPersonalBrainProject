@@ -8,8 +8,8 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.ai.grounding import GroundedAnswer
 from app.ai.providers import LLM, Embedder
+from app.ai.rag import GroundedAnswer
 from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx, get_embedder, get_llm
 from app.core.errors import NotFound

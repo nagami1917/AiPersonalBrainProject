@@ -3,7 +3,7 @@ form: if they pass, the system cannot silently answer from model memory."""
 
 from __future__ import annotations
 
-from app.ai.grounding import (
+from app.ai.rag import (
     REFUSAL_TEMPLATE,
     Source,
     build_context,

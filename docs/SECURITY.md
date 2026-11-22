@@ -104,7 +104,7 @@ Documents are user-supplied text and may contain adversarial instructions ("igno
 
 - Retrieved content is wrapped in numbered `<source>` blocks.
 - The system prompt states that source content is **data to cite, not instructions**.
-- The model may only cite ids that exist in the supplied set; **fabricated markers are stripped server-side** and counted as a `grounding_violation` in the logs (`app/ai/grounding.py`).
+- The model may only cite ids that exist in the supplied set; **fabricated markers are stripped server-side** and counted as a `grounding_violation` in the logs (`app/ai/rag/answer_generator.py`).
 - The model has no tool access and no database credentials, so a successful injection cannot escalate beyond producing a bad answer.
 - Attachments are never executed or rendered as HTML in the UI.
 
@@ -135,7 +135,7 @@ Parsers (PyMuPDF, `python-docx`, `markdown-it-py`, BeautifulSoup) run on untrust
 - Conversation history is stored so answers remain reproducible; `retrieval_debug` explains why a given answer was produced.
 - No analytics, telemetry, or third-party scripts in the frontend in the MVP.
 
-**Provider exposure:** document chunks are sent to the embedding provider and retrieved passages to the LLM provider. This is disclosed in the UI copy and is inherent to the architecture. The roadmap's provider-swap point (`app/ai/providers.py` protocol boundary) exists partly so this can change without touching retrieval.
+**Provider exposure:** document chunks are sent to the embedding provider and retrieved passages to the LLM provider. This is disclosed in the UI copy and is inherent to the architecture. The roadmap's provider-swap point (`app/ai/providers/base.py` protocol boundary) exists partly so this can change without touching retrieval.
 
 ---
 

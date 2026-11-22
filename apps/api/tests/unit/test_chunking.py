@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.ai.chunking import (
+from app.ai.ingestion.chunker import (
     MAX_TOKENS,
     MIN_TOKENS,
     TARGET_TOKENS,
@@ -92,7 +92,7 @@ class TestChunking:
             assert chunk.token_count <= MAX_TOKENS + 10, chunk.token_count
 
     def test_overlap_never_exceeds_its_budget(self):
-        from app.ai.chunking import OVERLAP_TOKENS, _tail_overlap
+        from app.ai.ingestion.chunker import OVERLAP_TOKENS, _tail_overlap
 
         huge = "no punctuation here " * 500
         assert approx_tokens(_tail_overlap(huge)) <= OVERLAP_TOKENS + 5
@@ -110,7 +110,7 @@ class TestPinnedStrategy:
     """
 
     def test_targets_are_the_documented_ones(self):
-        from app.ai.chunking import OVERLAP_TOKENS, TARGET_TOKENS
+        from app.ai.ingestion.chunker import OVERLAP_TOKENS, TARGET_TOKENS
 
         assert TARGET_TOKENS == 700
         assert OVERLAP_TOKENS == 100

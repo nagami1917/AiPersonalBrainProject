@@ -22,7 +22,7 @@ import io
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from app.ai.chunking import normalize_text
+from app.ai.ingestion.chunker import normalize_text
 
 
 @dataclass

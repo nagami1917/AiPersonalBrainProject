@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 
 import asyncpg
 import pytest
-from app.ai.chunking import TARGET_TOKENS
+from app.ai.ingestion import TARGET_TOKENS
 from app.core.config import get_settings
 from app.workers import ingest
 
@@ -226,3 +226,61 @@ class TestChunkSizing:
         assert len(tokens) > 1
         assert all(row["token_count"] <= 1200 for row in tokens)
         assert any(row["token_count"] > TARGET_TOKENS // 2 for row in tokens)
+
+
+class TestArmExclusivity:
+    """A weight of zero must EXCLUDE an arm, not merely score its rows at zero.
+
+    The bug this pins: `hybrid_search` computed `0.0 / (rrf_k + rank)` for the
+    zero-weighted arm, which is still a row in the fused set. A semantic-only
+    search therefore returned keyword matches it had been explicitly asked to
+    exclude, and `semantic` mode silently behaved like `hybrid` minus ranking.
+    """
+
+    @staticmethod
+    async def _hits(conn, workspace_id: str, *, mode: str, embedding: list[float]):
+        from app.ai.providers import Embedder
+        from app.ai.retrieval import search
+        from app.core.config import get_settings
+
+        class Seeded(Embedder):
+            model = "text-embedding-3-small"
+            dim = 1536
+
+            async def embed(self, texts):  # type: ignore[no-untyped-def]
+                return [embedding for _ in texts]
+
+        return await search(
+            conn,
+            workspace_id=workspace_id,
+            query="secrets",
+            mode=mode,
+            embedder=Seeded(),
+            settings=get_settings(),
+            match_count=8,
+        )
+
+    async def test_each_mode_returns_only_its_own_arm(self, conn):
+        workspace_id = await conn.fetchval(
+            "select id from public.workspaces where owner_id = $1 and personal limit 1", ALICE
+        )
+        if workspace_id is None:
+            pytest.skip("seed data missing: run `make db-reset` first")
+
+        # Query with a real seeded vector so the vector arm has something true to find.
+        raw = await conn.fetchval(
+            "select embedding::text from public.document_chunks "
+            "where workspace_id=$1 and document_id is not null limit 1",
+            workspace_id,
+        )
+        vector = [float(x) for x in raw.strip("[]").split(",")]
+
+        semantic = await self._hits(conn, str(workspace_id), mode="semantic", embedding=vector)
+        keyword = await self._hits(conn, str(workspace_id), mode="keyword", embedding=vector)
+        hybrid = await self._hits(conn, str(workspace_id), mode="hybrid", embedding=vector)
+
+        assert semantic, "the vector arm must find the chunk it was seeded from"
+        assert keyword, "the keyword arm must find 'secrets'"
+        assert all(h.keyword_rank is None for h in semantic), "semantic leaked keyword hits"
+        assert all(h.vector_rank is None for h in keyword), "keyword leaked vector hits"
+        assert len(hybrid) >= len(semantic), "hybrid is a union of both arms"

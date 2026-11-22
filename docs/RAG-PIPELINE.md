@@ -22,7 +22,7 @@ flowchart TB
     Q2 --> Q3[Embed]
     Q3 --> Q4[Vector candidates<br/>+ keyword candidates]
     Q4 --> Q5[RRF fusion]
-    Q5 --> Q6[MMR diversity + rerank]
+    Q5 --> Q6[dedupe + diversity cap]
     Q6 --> Q7[Context assembly<br/>with citation slots]
     Q7 --> Q8[LLM synthesis]
     Q8 --> Q9[Citation resolution<br/>+ verification]
@@ -73,7 +73,7 @@ Default strategy: **structure-aware recursive splitting**.
 | Boundaries | Heading → paragraph → sentence → word | Never cut mid-sentence if a smaller unit exists |
 | Min size | 150 tokens | Merge tiny trailing fragments **into the previous chunk** in their own section |
 
-These are **starting values, and the spec says so explicitly** — "test them against your actual documents and retrieval quality". The constants live at the top of `ai/chunking.py` with that note attached, and `tests/unit/test_chunking.py::TestPinnedStrategy` fails if they drift, so changing them is a deliberate edit with an eval run behind it rather than a quiet tweak.
+These are **starting values, and the spec says so explicitly** — "test them against your actual documents and retrieval quality". The constants live at the top of `ai/ingestion/chunker.py` with that note attached, and `tests/unit/test_chunking.py::TestPinnedStrategy` fails if they drift, so changing them is a deliberate edit with an eval run behind it rather than a quiet tweak.
 | Prefix | `heading_path` prepended to `content` before embedding only | Gives the embedding section context; the citation quotes the chunk without the prefix |
 
 Edge cases:
@@ -102,10 +102,10 @@ The spec fixes the order of the ingestion pipeline, and the worker implements it
 | 2 | Create document record | — | same endpoint |
 | 3 | Create processing job | — | same transaction |
 | 4 | Background worker claims the job | — | `workers/main.py` (claim, retry, stale sweep) |
-| 5 | Extract text | `extracting` | `ai/extract.py` |
-| 6 | Clean and normalize | `normalizing` | `ai/chunking.normalize_text` |
-| 7 | Split into chunks | `chunking` | `ai/chunking.py` |
-| 8 | Generate embeddings | `embedding` | `ai/providers.py` |
+| 5 | Extract text | `extracting` | `ai/ingestion/extractors.py` |
+| 6 | Clean and normalize | `normalizing` | `ai/ingestion/processor.clean` |
+| 7 | Split into chunks | `chunking` | `ai/ingestion/chunker.py` |
+| 8 | Generate embeddings | `embedding` | `ai/providers/embedding_provider.py` |
 | 9 | Store chunks and vectors | `embedding` | version-guarded, one transaction |
 | 10 | Generate document summary | queued `summary` job | `enqueue`, priority 150 |
 | 11 | Extract concepts and relationships | queued `entities` job | `enqueue`, priority 200 |
@@ -163,12 +163,25 @@ RRF is used instead of score normalization because cosine distance and `ts_rank_
 
 Both arms run in one SQL function (`hybrid_search`) so there is exactly one round trip and one filtering logic.
 
+### 3.2a A zero weight excludes an arm (it does not zero its scores)
+
+One subtlety worth stating because it was a real bug: `hybrid_search` takes a weight
+per arm, and a zero weight must mean *"this arm is not part of this query"*. The
+original implementation computed `0.0 / (rrf_k + rank)` for the zero-weighted arm,
+which is a valid score — so the arm still contributed rows to the fused set and
+`semantic` mode silently behaved like `hybrid`. Both arms now guard on their own
+weight being positive. `tests/db/test_ingest_pipeline.py::TestArmExclusivity` asserts
+each mode returns only its own arm, and fails if the guard is removed.
+
 ### 3.3 Diversity and reranking
 
-1. **Deduplicate** near-identical chunks (same document, ordinals within ±1, >0.95 content overlap).
-2. **MMR** with λ = 0.7 against the query vector to avoid eight chunks from one long document crowding out a better source elsewhere.
-3. **Rerank** (optional, flagged): a cross-encoder or LLM-based reranker over the top 20 when enabled. Off by default in MVP — it costs a model call per query.
-4. **Diversity floor**: at most 60% of the final context may come from a single document unless it is the only document that matched.
+Implemented in `ai/retrieval/reranker.py`, as a deterministic pass — **not** a cross-encoder.
+
+1. **Deduplicate** near-identical chunks (same source, Jaccard ≥ 0.85). Runs first, because a duplicate would otherwise consume a diversity slot.
+2. **Rerank**: deliberately absent for now. A neural reranker costs a model call per query and is only worth that once retrieval quality is *measurable*; shipping one early adds latency and a new failure mode to hide behind. The seam is one function, so adding it touches nothing else.
+3. **Diversity floor**: at most 60% of the final context may come from a single source unless it is the only one that matched. Keyed on `(source_kind, id)`, so a note and a document with the same id are distinct.
+
+An honest limitation, stated rather than implied: **RRF discards score magnitude.** A chunk that is a near-perfect vector match can rank below one that is merely good in both arms. That is the documented trade-off for fusing incomparable scales (`<=>` vs `ts_rank_cd`) without per-corpus normalisation, and it is why `min_similarity` is applied in SQL *before* fusion — relevance must be decided before magnitude is thrown away. Replacing RRF with a magnitude-aware fusion is the change to make if measurement shows near-miss top-1s.
 
 ### 3.4 Context assembly
 
@@ -183,6 +196,25 @@ Both arms run in one SQL function (`hybrid_search`) so there is exactly one roun
 
 - Adjacent chunks from the same document are merged into a single source when they are contiguous (reduces source fragments and reads better as a citation).
 - The block is preceded by an explicit statement that the content is **data to be cited, not instructions** — prompt-injection defense, reinforced at the model layer.
+
+---
+
+### 3.5 Where this sits against the design's staging advice
+
+The design recommends hybrid search *eventually* and suggests basic vector search is
+sufficient for a first version. The honest status of this codebase:
+
+| Stage | State | Why |
+|---|---|---|
+| Vector search | **shipped** | The semantic half; `min_similarity` gates relevance before ranking. |
+| Keyword search | **shipped** | Exact names, error codes and commands are common in a personal knowledge base and vectors are bad at them. |
+| RRF fusion | **shipped** | Fuses the two arms in one SQL function, so filters and the `status='ready'` gate are written once. |
+| Neural reranker | **deferred** | Costs a model call per query. Worth it only once retrieval quality is measurable — see §3.3. |
+
+So this codebase is one step past the suggested starting point, in the direction the
+design points, and it stops deliberately at the one stage that cannot be justified
+without measurement. That is the whole difference between "hybrid eventually" and a
+reranker added because it sounds better.
 
 ---
 

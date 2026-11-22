@@ -78,6 +78,43 @@ The application layer never proxies file bytes through itself; clients upload vi
 Owns: text extraction, normalization, structure-aware chunking, embedding, retrieval, fusion, reranking, context assembly, prompt construction, summarization, entity/knowledge extraction.
 See [RAG-PIPELINE.md](./RAG-PIPELINE.md).
 
+#### Module map (`apps/api/app/ai/`)
+
+The design asks for the AI backend to be separate services rather than one bag of helpers. It is organised by *pipeline stage*, and each module is named for the one thing it decides:
+
+```
+ai/
+├── providers/            vendor adapters behind two Protocols
+│   ├── base.py               Embedder, LLM — the only shapes the rest of the app sees
+│   ├── embedding_provider.py batching, retry, dimension enforcement
+│   └── llm_provider.py       blocking + streaming completions
+├── ingestion/            bytes (or text) in → embedded chunks out
+│   ├── extractors.py         format → text + page map (PyMuPDF, docx, MD, HTML)
+│   ├── chunker.py            structure-aware splitting, 700/100
+│   └── processor.py          clean → split → embed, in order, with a stage callback
+├── retrieval/            candidates in → ordered hits out
+│   ├── vector_search.py      the shared `Hit` shape + the vector arm
+│   ├── keyword_search.py     Postgres FTS arm: exact names, phrases, codes
+│   └── reranker.py           dedupe, diversity cap, score scaling
+├── rag/                  sources in → a verifiable answer out
+│   ├── context_builder.py    numbered, delimited `<source>` blocks
+│   ├── prompt_builder.py     system prompt + user turn
+│   └── answer_generator.py   citation resolution, fabrication stripping, refusal
+├── knowledge/            text in → graph edges out
+│   ├── entity_extractor.py   validation of the model's JSON, normalisation
+│   ├── relation_extractor.py the prompt + the precision rules
+│   └── graph_builder.py      upserts, and "link only what the text mentions"
+└── summarization/        one summary per source kind
+    ├── document_summary.py
+    └── note_summary.py
+```
+
+Three placement decisions worth knowing, because the obvious alternative is wrong:
+
+- **The scan is in SQL, not Python.** `vector_search` and `keyword_search` own retrieval *policy* (weights, candidate counts, the similarity floor) but the HNSW/tsvector scan runs inside `public.hybrid_search`. A Python-side scan would pull the corpus across the wire. Both arms call that one function with different weights rather than duplicating it, so a tenancy or `status='ready'` fix has exactly one place to be made.
+- **Persistence stays in the workers.** `ingestion/processor.py` is pure so it can be tested without a database; stage updates, version guards, and the transaction that writes chunks belong to `workers/ingest.py`, which owns the queue that drives them.
+- **`reranker` is not a neural reranker** and does not pretend to be. It is the deterministic ordering pass (dedupe, diversity, scaling). The seam for a real one is a single function, deliberately left visible. See RAG-PIPELINE.md §3.3 for why, and for the RRF limitation that measurement should decide on.
+
 ### 6. Background processing — worker · job queue · retries
 Owns: everything slow or failure-prone. Extraction, embedding, entity extraction, graph updates, retries, dead-lettering.
 Runs as a **separate Fly.io process** from the API so a 400-page PDF can never stall a chat request.

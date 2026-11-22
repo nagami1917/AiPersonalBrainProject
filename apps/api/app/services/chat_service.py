@@ -21,16 +21,16 @@ from typing import Any
 
 import asyncpg
 
-from app.ai.grounding import (
+from app.ai.providers import LLM, Embedder
+from app.ai.rag import (
     REFUSAL_TEMPLATE,
     SYSTEM_PROMPT,
     Citation,
     GroundedAnswer,
+    build_user_turn,
     resolve_citations,
     should_refuse,
 )
-from app.ai.prompts import build_user_turn
-from app.ai.providers import LLM, Embedder
 from app.core.config import Settings
 from app.core.errors import NotFound
 from app.schemas.chat import ChatRequest, CitationOut

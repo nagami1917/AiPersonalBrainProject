@@ -1,4 +1,14 @@
-"""Retrieval orchestration: embed → SQL hybrid search → diversify → sources."""
+"""Retrieval orchestration: mode dispatch → diversify → sources.
+
+The arms and their ordering live in `app.ai.retrieval`; this service adds the two
+things that are not the AI layer's business: the request-scoped settings, and the
+candidate counts the API reports back so a user can see *why* a result surfaced.
+
+The one policy decision here is what happens when the embedding provider is down.
+It is deliberately NOT a silent fallback: `semantic` raises, `hybrid` degrades to
+the keyword arm and says so in the logs, because presenting degraded retrieval as
+full quality would misrepresent how well an answer is grounded.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +16,11 @@ import logging
 
 import asyncpg
 
-from app.ai.grounding import Source
 from app.ai.providers import Embedder
-from app.ai.retrieval import Hit, dedupe, limit_per_source, row_to_hit, to_sources
+from app.ai.rag import Source
+from app.ai.retrieval import Hit, SearchFilters, search, to_sources
 from app.core.config import Settings
-from app.core.errors import ProviderUnavailable
-from app.repositories import search as search_repo
-from app.schemas.chat import SearchFilters
+from app.schemas.chat import SearchFilters as RequestFilters
 
 log = logging.getLogger(__name__)
 
@@ -31,44 +39,15 @@ class RetrievalResult:
         self.keyword_candidates = keyword_candidates
 
 
-async def retrieve(
-    conn: asyncpg.Connection,
-    *,
-    workspace_id: str,
-    query: str,
-    embedder: Embedder,
-    settings: Settings,
-    filters: SearchFilters | None = None,
-    match_count: int | None = None,
-    mode: str = "hybrid",
-) -> RetrievalResult:
-    filters = filters or SearchFilters()
-    embedding: list[float] | None = None
+def _filters(filters: RequestFilters | None) -> SearchFilters:
+    """Translate the API schema into the retrieval layer's own filter type.
 
-    if mode != "keyword":
-        try:
-            vectors = await embedder.embed([query])
-            embedding = vectors[0] if vectors else None
-        except ProviderUnavailable:
-            # Deliberately NOT a silent keyword-only fallback for chat: the
-            # caller decides, because presenting degraded retrieval as full
-            # quality would misrepresent how well the answer is grounded.
-            if mode == "semantic":
-                raise
-            log.warning("embedding unavailable; hybrid degraded to keyword arm")
-            embedding = None
-
-    rows = await search_repo.hybrid(
-        conn,
-        workspace_id=workspace_id,
-        query=query,
-        embedding=embedding,
-        match_count=match_count or settings.retrieval_k,
-        candidate_count=settings.candidate_k,
-        vector_weight=settings.vector_weight,
-        keyword_weight=settings.keyword_weight,
-        rrf_k=settings.rrf_k,
-        min_similarity=settings.min_similarity,
+    Two types rather than one so a request-shape change cannot silently alter
+    retrieval semantics, and so the AI layer never imports a Pydantic model.
+    """
+    if filters is None:
+        return SearchFilters()
+    return SearchFilters(
         collection_id=filters.collection_id,
         created_after=filters.created_after,
         created_before=filters.created_before,
@@ -76,10 +55,30 @@ async def retrieve(
         kind=filters.kind,
     )
 
-    hits = [row_to_hit(row) for row in rows]
-    hits = dedupe(hits)
-    hits = limit_per_source(hits)
-    hits = hits[: (match_count or settings.retrieval_k)]
+
+async def retrieve(
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: str,
+    query: str,
+    embedder: Embedder,
+    settings: Settings,
+    filters: RequestFilters | None = None,
+    match_count: int | None = None,
+    mode: str = "hybrid",
+) -> RetrievalResult:
+    limit = match_count or settings.retrieval_k
+
+    hits = await search(
+        conn,
+        workspace_id=workspace_id,
+        query=query,
+        mode=mode,
+        embedder=embedder,
+        settings=settings,
+        match_count=limit,
+        filters=_filters(filters),
+    )
 
     return RetrievalResult(
         hits=hits,

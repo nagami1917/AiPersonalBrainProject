@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 import pytest
-from app.ai.grounding import REFUSAL_TEMPLATE
+from app.ai.rag import REFUSAL_TEMPLATE
 from app.core.config import get_settings
 from app.core.security import AuthUser
 from app.schemas.chat import ChatRequest

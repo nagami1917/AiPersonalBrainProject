@@ -12,7 +12,7 @@ committing a binary fixture to the repository.
 from __future__ import annotations
 
 import pytest
-from app.ai.extract import (
+from app.ai.ingestion.extractors import (
     ExtractionError,
     extract,
     extractor_for,
@@ -167,11 +167,11 @@ class TestDispatch:
 
 class TestScanDetection:
     def test_text_poor_pdf_looks_like_a_scan(self):
-        from app.ai.extract import ExtractionResult
+        from app.ai.ingestion.extractors import ExtractionResult
 
         assert looks_like_scan(ExtractionResult(text="tiny", page_count=10)) is True
 
     def test_text_rich_pdf_does_not(self):
-        from app.ai.extract import ExtractionResult
+        from app.ai.ingestion.extractors import ExtractionResult
 
         assert looks_like_scan(ExtractionResult(text="x" * 5000, page_count=10)) is False

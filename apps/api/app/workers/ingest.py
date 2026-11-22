@@ -16,12 +16,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import asyncpg
 
-from app.ai.chunking import chunk_text, normalize_text
-from app.ai.extract import ExtractionError, extract
+from app.ai.ingestion import (
+    EmptySourceError,
+    ExtractionError,
+    extract,
+    prepare_chunks,
+)
 from app.ai.providers import Embedder
 from app.core.config import Settings
 
@@ -161,28 +165,16 @@ async def run_ingest(
             await _fail(conn, target, "No text could be extracted from this source.")
             return
 
-        # --- 2. clean + normalize -------------------------------------------
-        # A distinct stage, not an implicit side effect of extraction, because it
-        # is the stage that most often changes retrieval quality: it collapses
-        # whitespace, unifies quotes, and (for PDFs) drops running headers and
-        # page-number lines that would otherwise become citable "content".
+        # --- 2. clean + normalize, 3. chunk, 4. embed ----------------------
+        # The ordered pipeline lives in ai/ingestion/processor.py, where it can be
+        # tested without a database. The stage updates stay here because they are
+        # database writes; the stage *sequence* mirrors the processor's steps, and
+        # that mirroring is the thing a reviewer must be able to check by eye.
         await _set_stage(conn, target, "normalizing")
-        cleaned = normalize_text(target.text)
-        if not cleaned.strip():
-            await _fail(conn, target, "No text could be extracted from this source.")
-            return
-        target = replace(target, text=cleaned)
-
-        # --- 3. chunk ------------------------------------------------------
         await _set_stage(conn, target, "chunking")
-        chunks = chunk_text(target.text, target.page_map)
-        if not chunks:
-            await _fail(conn, target, "No text could be extracted from this source.")
-            return
-
-        # --- 4. embed ------------------------------------------------------
         await _set_stage(conn, target, "embedding")
-        embeddings = await embedder.embed([c.content for c in chunks])
+        prepared = await prepare_chunks(target.text, embedder, page_map=target.page_map)
+        chunks = [item.chunk for item in prepared]
 
         # --- 5. store chunks + vectors, version-guarded ---------------------
         parent_col = "note_id" if target.kind == "note" else "document_id"
@@ -201,7 +193,7 @@ async def run_ingest(
                 f"delete from public.document_chunks where {parent_col}=$1", target.id
             )
 
-            for chunk, embedding in zip(chunks, embeddings, strict=True):
+            for item in prepared:
                 await conn.execute(
                     f"""insert into public.document_chunks
                         (workspace_id, {parent_col}, chunk_index, content, token_count,
@@ -210,15 +202,15 @@ async def run_ingest(
                         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector,$12,$13)""",
                     target.workspace_id,
                     target.id,
-                    chunk.chunk_index,
-                    chunk.content,
-                    chunk.token_count,
-                    chunk.char_start,
-                    chunk.char_end,
-                    chunk.page_number,
-                    chunk.page_end,
-                    chunk.heading_path,
-                    _vector_literal(embedding),
+                    item.chunk.chunk_index,
+                    item.chunk.content,
+                    item.chunk.token_count,
+                    item.chunk.char_start,
+                    item.chunk.char_end,
+                    item.chunk.page_number,
+                    item.chunk.page_end,
+                    item.chunk.heading_path,
+                    _vector_literal(item.embedding),
                     embedder.model,
                     target.version,
                 )
@@ -282,6 +274,11 @@ async def run_ingest(
     except ExtractionError as exc:
         await _fail(conn, target, exc.message)
         raise
+    except EmptySourceError as exc:
+        # Extraction succeeded but nothing usable survived: same user-visible
+        # outcome as an unreadable file, same failure path.
+        await _fail(conn, target, str(exc))
+        return
     except Exception:
         await conn.execute(
             f"""update public.{_table(target.kind)}
