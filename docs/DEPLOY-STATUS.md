@@ -115,6 +115,19 @@ matches what CI builds on. There is **no way to catch this locally**: a local
 `npm run build` emits a valid Build Output bundle and exits 0 either way. Only a
 real upload to Vercel rejects the runtime.
 
+### Git deployments do work after all
+
+An earlier note claimed the project was created with git deployments disabled and
+that merging would not publish. **That was wrong** — checked against the live
+deployment list. Merge commit `5961edd` produced a production deployment
+(`dpl_GRg7R9sqvCHVSZaT82ideEeXcJxG`, `READY` / `PROMOTED`), and the platform also
+built each push to the branch as a staged deployment.
+
+So a push to `main` *does* publish to `https://nexus-final-thesis.vercel.app`.
+The confusion came from the project's `link.gitProviderOptions.createDeployments`
+reading `disabled` at creation time; what actually governs this is the
+GitHub-App integration, which is active.
+
 ## 4. What is deliberately not done
 
 ### The API and worker are not deployed
@@ -186,16 +199,40 @@ curl -fsS https://nexus-api.fly.dev/ready
 `/ready` is the meaningful one: it fails if the database is unreachable, whereas
 `/health` deliberately only proves the process is alive.
 
-### 5.3 Supabase auth settings
+### 5.3 Supabase auth settings — DONE, and a warning
 
-Two settings in Dashboard → Authentication → URL Configuration:
+**Already applied** to `tthaxwiootsbidryiboe`:
 
 - **Site URL**: `https://nexus-final-thesis.vercel.app`
-- **Redirect allow-list**: the same origin (plus `http://localhost:5173` if you
-  want local sign-in to keep working)
+- **Redirect allow-list**: that origin, `/**` under it, the `nexus-git-main-…`
+  branch alias, and `http://localhost:5173` (+ `/**`) so local sign-in still works
 
-Without the Site URL, signup confirmation mails link to `localhost` and the
-confirm click dead-ends.
+The project shipped with Site URL `http://localhost:3000`, so every confirmation
+and recovery mail pointed at a host that does not exist for the user. A signup
+would have been uncompletable.
+
+> **`update_auth_config` is a full replace, not a patch.** Fields you omit are
+> reset to `null`, not left alone. Applying it dropped
+> `rate_limit_email_sent` (2 → `null`), `sms_provider` (`twilio` → `null`), and
+> the `sessions_inactivity_timeout` / `sessions_timebox` values (0 → `null`).
+> None of those are used by this app — SMS is disabled, sessions are
+> Supabase-managed, and `/auth/v1/recover` returns 429 independently of the
+> setting — but **read the whole config before calling this tool**, and re-send
+> every field you want to preserve.
+
+### 5.4 Migration-history hygiene
+
+The live project's `supabase_migrations.schema_migrations` contains the 19
+migrations under the repository's own file names, plus one row named
+`seed_local_development_corpus`.
+
+The seed is deliberately **not** a repository migration (`supabase/seed.sql`),
+but it was applied through the migrations tool so it would run inside a single
+transaction — the seed depends on a `pg_temp` function that only lives for one
+transaction. The row is accurate history, not drift.
+
+A scratch row, `probe_pg_temp_scope` (a throwaway temp-function visibility check),
+has been deleted so the history reflects only real schema work.
 
 ## 6. Before real users
 
