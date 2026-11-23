@@ -55,9 +55,21 @@ async def list_notes(
     workspace_id: str | None = Query(default=None),
     status: str | None = None,
     collection_id: str | None = None,
+    tag: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = None,
 ) -> dict[str, Any]:
+    """Flat alias for the notes list.
+
+    Every filter the scoped route accepts has to be accepted **and forwarded**
+    here. When `q` and `tag` were added to the scoped route and not to this one,
+    the alias still type-checked: the scoped function was called with keyword
+    arguments that omitted them, so its `Query(...)` defaults — which are
+    parameter *objects*, not `None` — leaked into the SQL parameter list and the
+    query failed at runtime. That is why this list mirrors the scoped signature
+    exactly rather than passing a subset.
+    """
     from app.api.routes.notes import list_notes as scoped
 
     ctx = await _ctx(conn, user.id, workspace_id)
@@ -66,6 +78,8 @@ async def list_notes(
         conn=conn,
         status=status,
         collection_id=collection_id,
+        tag=tag,
+        q=q,
         limit=limit,
         cursor=cursor,
     )

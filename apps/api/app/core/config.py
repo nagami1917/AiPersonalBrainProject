@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     worker_concurrency: int = 2
     worker_poll_interval_seconds: float = 2.0
     job_stale_after_seconds: int = 900
+    # How long a deleted note or document stays restorable before purge removes
+    # it for good. 30 days is the retention users expect from a "trash" feature;
+    # 0 disables recovery (delete is immediate), which is a deliberate choice a
+    # deployment can make rather than a default anyone falls into by accident.
+    trash_retention_days: int = 30
     signed_upload_ttl_seconds: int = 300
     signed_download_ttl_seconds: int = 60
     storage_bucket: str = "nexus-documents"

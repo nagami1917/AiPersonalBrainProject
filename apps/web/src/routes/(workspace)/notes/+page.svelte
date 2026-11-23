@@ -6,6 +6,7 @@
   import ProcessingStatus from '$lib/components/documents/ProcessingStatus.svelte';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
+  import TrashPanel from '$lib/components/TrashPanel.svelte';
   import { relativeTime } from '$lib/utils/format';
 
   let notes = $state<NoteSummary[]>([]);
@@ -14,11 +15,23 @@
   let creating = $state(false);
   let title = $state('');
   let body = $state('');
+  let view = $state<'active' | 'trash'>('active');
+  let query = $state('');
+  let searching = $state(false);
 
-  async function load() {
+  /**
+   * The search box filters through the API (`?q=`) rather than in the browser.
+   *
+   * Client-side filtering would only search the page already loaded, so a note
+   * on page 2 would appear missing — the failure that teaches people not to
+   * trust search. This is the substring filter, not semantic search: it costs no
+   * embedding call and stays instant while typing.
+   */
+  async function load(q = query) {
     if (!$activeWorkspaceId) return;
     try {
-      const response = await apiFetch<{ items: NoteSummary[] }>(wsPath('/notes'));
+      const params = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
+      const response = await apiFetch<{ items: NoteSummary[] }>(wsPath(`/notes${params}`));
       notes = response.items;
     } catch (err) {
       error =
@@ -30,7 +43,20 @@
     }
   }
 
-  onMount(load);
+  onMount(() => void load());
+
+  // Debounced so typing does not issue a request per keystroke. 250ms is short
+  // enough to feel immediate and long enough that a fast typist sends one.
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  function onSearchInput(value: string) {
+    query = value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searching = true;
+    searchTimer = setTimeout(() => {
+      searching = false;
+      void load(value);
+    }, 250);
+  }
 
   async function create() {
     if (!title.trim() || !body.trim()) return;
@@ -68,6 +94,49 @@
     </button>
   </header>
 
+  <div class="flex flex-wrap items-center gap-2">
+    <div class="flex rounded-lg border border-ink-800 p-0.5">
+      <button
+        class="rounded-md px-3 py-1 text-xs transition-colors"
+        class:bg-ink-800={view === 'active'}
+        class:text-ink-100={view === 'active'}
+        class:text-ink-500={view !== 'active'}
+        onclick={() => (view = 'active')}
+      >
+        Notes
+      </button>
+      <button
+        class="rounded-md px-3 py-1 text-xs transition-colors"
+        class:bg-ink-800={view === 'trash'}
+        class:text-ink-100={view === 'trash'}
+        class:text-ink-500={view !== 'trash'}
+        onclick={() => (view = 'trash')}
+      >
+        Trash
+      </button>
+    </div>
+    {#if view === 'active'}
+      <input
+        class="input max-w-xs flex-1"
+        type="search"
+        placeholder="Search notes…"
+        value={query}
+        oninput={(e) => onSearchInput((e.currentTarget as HTMLInputElement).value)}
+        aria-label="Search notes by title or text"
+      />
+      {#if searching}
+        <span class="text-[10px] text-ink-600">searching…</span>
+      {/if}
+    {/if}
+  </div>
+
+  {#if view === 'trash'}
+    <TrashPanel
+      kind="notes"
+      onrestored={() => void load()}
+    />
+  {:else}
+
   {#if error}
     <ErrorNotice message={error.message} code={error.code} />
   {/if}
@@ -102,7 +171,14 @@
       {#each [1, 2] as i}<div class="skeleton h-14 w-full"></div>{/each}
     </div>
   {:else if notes.length === 0}
-    <EmptyState title="No notes yet" description="Write one and it becomes searchable immediately." />
+    {#if query.trim()}
+      <EmptyState
+        title="No notes match that search"
+        description="Search looks at note titles and text. Semantic search is on the Search page."
+      />
+    {:else}
+      <EmptyState title="No notes yet" description="Write one and it becomes searchable immediately." />
+    {/if}
   {:else}
     <ul class="divide-y divide-ink-800 rounded-xl border border-ink-800">
       {#each notes as note (note.id)}
@@ -124,4 +200,5 @@
       {/each}
     </ul>
   {/if}
+{/if}
 </div>

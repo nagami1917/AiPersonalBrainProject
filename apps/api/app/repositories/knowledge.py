@@ -51,9 +51,23 @@ async def list_notes(
     *,
     status: str | None = None,
     collection_id: str | None = None,
+    query: str | None = None,
+    tag: str | None = None,
     limit: int = 25,
     cursor: str | None = None,
 ) -> list[asyncpg.Record]:
+    """List notes, optionally filtered.
+
+    `query` is a plain substring match over title and body, deliberately not
+    retrieval. The semantic search endpoint embeds the query, which costs an
+    API call per keystroke and returns *passages*; what a notes list needs is
+    "which of my notes mention this word", answered from the local database in
+    a millisecond.
+
+    Case-insensitivity comes from `position(lower(x) in lower(q))` rather than
+    ILIKE, so a query containing `%` or `_` is matched literally instead of
+    acting as a wildcard — a user searching for "50%" should not get every note.
+    """
     conditions = ["workspace_id=$1", "deleted_at is null"]
     args: list[Any] = [workspace_id]
     if status:
@@ -62,6 +76,18 @@ async def list_notes(
     if collection_id:
         args.append(collection_id)
         conditions.append(f"collection_id=${len(args)}")
+    if query:
+        args.append(query.strip().lower())
+        conditions.append(
+            f"(position(${len(args)} in lower(title)) > 0"
+            f" or position(${len(args)} in lower(coalesce(content, ''))) > 0)"
+        )
+    if tag:
+        args.append(tag.strip().lower())
+        conditions.append(
+            f"exists (select 1 from public.note_tags nt join public.tags t on t.id = nt.tag_id"
+            f" where nt.note_id = notes.id and lower(t.name) = ${len(args)})"
+        )
     if cursor:
         args.append(cursor)
         conditions.append(f"updated_at < ${len(args)}::timestamptz")
@@ -531,3 +557,163 @@ async def reindex_backlinks_to_title(
         title,
         note_id,
     )
+
+
+# --- trash: soft delete, restore, purge --------------------------------------
+#
+# Deletion is deliberately two-phase. `deleted_at` marks a row as gone from
+# every user-facing view; a scheduled `purge` job removes it for good once
+# `trash_retention_days` has passed. A user who deletes a note by mistake has
+# that window to get it back — which is the whole point of having the column.
+#
+# Why the purge is *scheduled* rather than immediate: the original design
+# enqueued `purge` with the default `run_after = now()`, so the worker
+# hard-deleted the row seconds after the soft delete. `deleted_at` was then a
+# column nothing could ever read, and "recovery" existed only on paper. The
+# route now passes an explicit `run_after`, and `purge_*` refuses to delete a
+# row whose retention window has not elapsed — so a purge job that somehow runs
+# early is a no-op rather than data loss.
+
+
+async def list_deleted_notes(
+    conn: asyncpg.Connection, workspace_id: str, *, limit: int = 50
+) -> list[asyncpg.Record]:
+    """Notes in the trash, newest deletion first.
+
+    `content` is selected because the trash UI shows a snippet — the user is
+    choosing between several deleted notes and a list of bare titles is not
+    enough to tell them apart.
+    """
+    return list(
+        await conn.fetch(
+            """select id, title, status, collection_id, created_by,
+                      summary, content, error_message, version, embedding_model,
+                      created_at, updated_at, deleted_at
+               from public.notes
+               where workspace_id=$1 and deleted_at is not null
+               order by deleted_at desc
+               limit $2""",
+            workspace_id,
+            limit,
+        )
+    )
+
+
+async def restore_note(conn: asyncpg.Connection, note_id: str, workspace_id: str) -> bool:
+    """Bring a soft-deleted note back.
+
+    `status` returns to 'pending' rather than whatever it was before: the chunks
+    were deleted when the note was trashed, so 'ready' would claim searchable
+    content that no longer exists. The caller enqueues a fresh ingest job, and
+    the status is honest until that finishes.
+    """
+    result = await conn.execute(
+        """update public.notes
+           set deleted_at = null, status = 'pending', processing_stage = null,
+               error_message = null
+           where id=$1 and workspace_id=$2 and deleted_at is not null""",
+        note_id,
+        workspace_id,
+    )
+    return str(result).endswith("1")
+
+
+async def purge_note(conn: asyncpg.Connection, note_id: str, retention_days: int) -> bool:
+    """Hard-delete a note, but only once its retention window has elapsed.
+
+    Returns False when the row is not eligible, so the worker can log "skipped"
+    instead of silently succeeding. The window is re-checked here, in SQL,
+    because the environment variable that scheduled the job could have been
+    changed after it was queued — the database is the only place that knows
+    when the deletion actually happened.
+    """
+    result = await conn.execute(
+        """delete from public.notes
+           where id=$1
+             and deleted_at is not null
+             and deleted_at <= now() - make_interval(days => $2)""",
+        note_id,
+        retention_days,
+    )
+    return str(result).endswith("1")
+
+
+async def list_deleted_documents(
+    conn: asyncpg.Connection, workspace_id: str, *, limit: int = 50
+) -> list[asyncpg.Record]:
+    return list(
+        await conn.fetch(
+            """select id, title, filename, mime_type, file_size, status,
+                      collection_id, page_count, error_message, version,
+                      created_at, updated_at, deleted_at
+               from public.documents
+               where workspace_id=$1 and deleted_at is not null
+               order by deleted_at desc
+               limit $2""",
+            workspace_id,
+            limit,
+        )
+    )
+
+
+async def restore_document(conn: asyncpg.Connection, document_id: str, workspace_id: str) -> bool:
+    """Bring a soft-deleted document back.
+
+    The storage object was never removed — purge deletes it, and nothing else
+    does — so the file is still there and only the row needs un-marking. Status
+    is 'pending' for the same reason as notes: chunks were deleted on trash.
+    """
+    result = await conn.execute(
+        """update public.documents
+           set deleted_at = null, status = 'pending', processing_stage = null,
+               error_message = null
+           where id=$1 and workspace_id=$2 and deleted_at is not null""",
+        document_id,
+        workspace_id,
+    )
+    return str(result).endswith("1")
+
+
+async def purge_document(conn: asyncpg.Connection, document_id: str, retention_days: int) -> bool:
+    result = await conn.execute(
+        """delete from public.documents
+           where id=$1
+             and deleted_at is not null
+             and deleted_at <= now() - make_interval(days => $2)""",
+        document_id,
+        retention_days,
+    )
+    return str(result).endswith("1")
+
+
+async def purge_due_count(
+    conn: asyncpg.Connection, workspace_id: str, retention_days: int
+) -> dict[str, int]:
+    """How much is sitting in the trash past its window.
+
+    Used by the trash endpoint so the UI can say "these are removed
+    automatically" with a real number rather than a hand-wave, and so an
+    operator can see a backlog if the worker stops running.
+    """
+    row = await conn.fetchrow(
+        """select
+             (select count(*) from public.notes
+               where workspace_id=$1 and deleted_at is not null) as notes,
+             (select count(*) from public.documents
+               where workspace_id=$1 and deleted_at is not null) as documents,
+             (select count(*) from public.notes
+               where workspace_id=$1 and deleted_at is not null
+                 and deleted_at <= now() - make_interval(days => $2)) as notes_due,
+             (select count(*) from public.documents
+               where workspace_id=$1 and deleted_at is not null
+                 and deleted_at <= now() - make_interval(days => $2)) as documents_due""",
+        workspace_id,
+        retention_days,
+    )
+    assert row is not None
+    return {
+        "notes": int(row["notes"]),
+        "documents": int(row["documents"]),
+        "notes_due": int(row["notes_due"]),
+        "documents_due": int(row["documents_due"]),
+    }
