@@ -210,7 +210,34 @@ flowchart LR
   S -->|apps/api| M[migrate] --> F[Fly deploy]
 ```
 
-Blocking gates: lint, typecheck, unit tests, DB/RLS tests, and an eval-set run for any change touching chunking, retrieval, or prompts.
+Implemented in `.github/workflows/ci.yml`, in two jobs:
+
+| Job | Runs | Needs |
+|---|---|---|
+| `checks` | ruff · ruff format · mypy · 261 unit tests · 66 vitest · svelte-check · `npm run build` · `check-env.sh` · a grep for secret names in the client bundle | Python + Node only |
+| `database` | apply all 13 migrations to `pgvector/pgvector:pg16` · assert ≥15 tables exist · seed · `supabase/tests/tenancy.sql` · 99 db tests | a Postgres service container |
+
+The split matters. Before this workflow existed, the DB suite was guarded by
+`if [[ -n "$DATABASE_URL" ]]` in `scripts/check.sh`, so it silently **skipped**
+for anyone without a database — which is everyone in CI. The tenancy boundary,
+the one thing the roadmap calls expensive to retrofit, had no gate.
+
+Two details in the workflow are load-bearing rather than decorative:
+
+- The image is `pgvector/pgvector:pg16`, not stock `postgres`. Migration 0003
+  declares `vector(1536)` and builds an HNSW index; on a stock image 0001 fails
+  and every later test would be meaningless.
+- The job creates the Supabase surface (roles `anon`/`authenticated`/
+  `service_role`, the `auth` and `storage` schemas, `auth.uid()`) before applying
+  migrations, because the migrations depend on it exactly as in production.
+
+`make check` (`scripts/check.sh`) runs the same gates locally, including the DB
+suite when `DATABASE_URL` is set. CI is the authority; the local script is the
+convenience.
+
+Still to add: an eval-set run for changes touching chunking, retrieval or
+prompts. There is no populated eval set yet (`docs/RAG-PIPELINE.md` §5), so that
+gate cannot be built honestly — see ROADMAP's milestone table.
 
 ---
 

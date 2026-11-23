@@ -34,6 +34,7 @@ from app.core.config import get_settings
 from app.core.db import close_pool, get_pool
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging, install_request_logging
+from app.core.schema_guard import verify_schema
 
 log = logging.getLogger("nexus.api")
 
@@ -44,7 +45,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level)
     log.info("starting api (env=%s)", settings.environment)
     app.state.settings = settings
-    await get_pool(settings)
+    pool = await get_pool(settings)
+    # Boot-time schema guards, after the pool exists and before the first
+    # request. A width mismatch here is a deploy that would have failed later,
+    # one chunk at a time, with a misleading retry loop.
+    await verify_schema(pool, settings)
     try:
         yield
     finally:

@@ -16,8 +16,9 @@
  * credentials may be used by the browser"), so this module does not fight it:
  *
  *   - `PUBLIC_API_BASE_URL` is what the app reads;
- *   - a bare `API_BASE_URL` is accepted by the **dev proxy** (`vite.config.ts`,
- *     Node-side, never bundled), so the spec's spelling works locally;
+ *   - a bare `API_BASE_URL` is read **server-side** by the `/api/v1` proxy route
+ *     (`src/routes/api/v1/[...path]/+server.ts`), never bundled, so it is the
+ *     upstream for the same-origin shape rather than a browser setting;
  *   - the default with neither set is a relative path, which is the recommended
  *     production shape anyway.
  *
@@ -53,8 +54,8 @@ function required(name: string, value: string | undefined): string {
 function resolveApiBaseUrl(): string {
   const configured = (publicEnv.PUBLIC_API_BASE_URL || '').trim();
   if (!configured) {
-    // Same origin: the vite dev proxy, or a deployment that fronts both with one
-    // domain. Not an error — it is the recommended production shape.
+    // Same origin: the `/api/v1` route forwards server-side to `API_BASE_URL`.
+    // Not an error — it is the default production shape (DEPLOYMENT.md §3.1).
     return '';
   }
   return configured.replace(/\/+$/, '');

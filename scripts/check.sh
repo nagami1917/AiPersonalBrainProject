@@ -39,6 +39,8 @@ echo "==> deployment: environment configuration"
     DATABASE_URL=postgresql://u:p@h/db OPENAI_API_KEY=x \
     CORS_ALLOWED_ORIGINS=https://app.example \
     PUBLIC_SUPABASE_URL=https://example.supabase.co PUBLIC_SUPABASE_ANON_KEY=x \
+    API_BASE_URL=https://nexus-api.fly.dev \
+    SKIP_DB_CHECK=1 \
     ./scripts/check-env.sh >/dev/null ) \
   && echo "check-env.sh accepts a valid configuration" \
   || { echo "check-env.sh rejected a valid configuration"; exit 1; }

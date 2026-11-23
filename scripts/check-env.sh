@@ -91,6 +91,37 @@ else
   pass "embedding pair is consistent ($model / $dim)"
 fi
 
+# The pair check above compares settings against a table of known models. It
+# cannot see the *column*, which is `vector(1536)` pinned by migration 0003 —
+# the HNSW index is built for one width and is not rebuilt per request. A model
+# whose width disagrees with the column passes the check above and then fails on
+# the first chunk insert, after the upload was accepted. The API now refuses to
+# boot in that state (`app/core/schema_guard.py`); this is the pre-deploy echo of
+# the same check, and it only runs when a database is actually reachable.
+if [[ -z "${SKIP_DB_CHECK:-}" ]] && command -v psql >/dev/null 2>&1; then
+  db_url="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
+  if [[ -z "$db_url" ]]; then
+    note "embedding column not checked: no database URL"
+  else
+    col_dim="$(psql "$db_url" -tAc "
+      select atttypmod from pg_attribute
+      where attrelid = 'public.document_chunks'::regclass and attname = 'embedding'
+    " 2>/dev/null || true)"
+    if [[ -z "$col_dim" ]]; then
+      note "embedding column not checked: table or database unreachable"
+    elif [[ "$col_dim" == "-1" ]]; then
+      note "embedding column has no fixed dimension"
+    elif [[ "$col_dim" != "$dim" ]]; then
+      fail "configured dimension $dim does not match document_chunks.embedding vector($col_dim)"
+      note "ingestion would fail on the first chunk; migration 0003 pins the column"
+    else
+      pass "configured dimension matches the database column (vector($col_dim))"
+    fi
+  fi
+else
+  note "embedding column not checked (psql unavailable or SKIP_DB_CHECK=1)"
+fi
+
 origins="${CORS_ALLOWED_ORIGINS:-${ALLOWED_ORIGINS:-}}"
 if [[ -z "$origins" ]]; then
   warn "no CORS origins configured — the browser will be refused"
@@ -146,12 +177,18 @@ else
   note "requires the frontend and API to share an origin, or the vite/nginx proxy"
 fi
 
-# API_BASE_URL (the spec's name) cannot reach the browser: SvelteKit only exposes
-# PUBLIC_*. It still drives the dev proxy, so it is a warning, not a failure.
-if [[ -z "${PUBLIC_API_BASE_URL:-}" ]] && nonempty API_BASE_URL; then
-  warn "API_BASE_URL is set but PUBLIC_API_BASE_URL is not"
-  note "API_BASE_URL only configures the dev proxy; the browser needs the PUBLIC_ name,"
-  note "or leave it empty to use the same-origin /api/v1 path."
+# API_BASE_URL cannot reach the browser: SvelteKit only exposes PUBLIC_*. That is
+# correct and intended — it is the *server-side* upstream for the same-origin
+# route (src/routes/api/v1/[...path]/+server.ts), not a browser setting.
+if [[ -z "${PUBLIC_API_BASE_URL:-}" ]]; then
+  if nonempty API_BASE_URL; then
+    pass "API_BASE_URL is set — same-origin /api/v1 forwards to it server-side"
+    note "this pairing is the default shape: PUBLIC_API_BASE_URL empty, API_BASE_URL set"
+  else
+    warn "neither PUBLIC_API_BASE_URL nor API_BASE_URL is set"
+    note "the browser will call /api/v1 on its own origin and the proxy has no upstream"
+    note "in production that answers 503 api_upstream_not_configured; set API_BASE_URL."
+  fi
 fi
 
 # ---------------------------------------------------------------------------

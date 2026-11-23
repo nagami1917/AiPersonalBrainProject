@@ -1,6 +1,10 @@
 # NEXUS — Roadmap & Build Order
 
-Status: **design (spec phase)**
+Status: **M0–M4 implemented and tested; M5 partly; M6 deferred.**
+
+This document is the build order, not a status board. What each milestone's
+"Done when" line requires is stated so it can be checked; the per-item reality
+is summarised at the end of this file and in the README.
 
 The build order is chosen so that the product's riskiest claim — *"it answers from your data and cites it"* — is proven before anything is polished. UI, graph, and multi-tenant billing all rest on retrieval working.
 
@@ -10,7 +14,7 @@ The build order is chosen so that the product's riskiest claim — *"it answers 
 
 **Done when:** `make dev` boots frontend, API, and worker against a local Supabase stack; `/health` is green; CI runs lint + typecheck on every PR.
 
-- Monorepo layout: `frontend/` (SvelteKit, Tailwind, TS), `backend/` (FastAPI), `supabase/` (migrations + seed), `docs/`
+- Monorepo layout: `apps/web` (SvelteKit, Tailwind, TS), `apps/api` (FastAPI + worker), `supabase/` (migrations + seed), `docs/`
 - Env handling that fails loudly on a missing secret
 - Dockerfile for the backend; `fly.toml` with `web` + `worker` process groups
 - CI: ruff, mypy (or pyright), eslint, svelte-check, pytest
@@ -107,6 +111,29 @@ If M3 slips, everything else waits. A beautiful app over an ungrounded model is 
 | Read replicas | Sustained read saturation |
 
 ---
+
+
+---
+
+## Where each milestone actually stands
+
+Checked against the repository, not against intent. The "Done when" line above is
+the criterion; this is the verdict.
+
+| Milestone | State | What is missing |
+|---|---|---|
+| **M0** Foundation | Done, except CI locality | `.github/workflows/ci.yml` now runs lint, types, unit, db/RLS and build. It is new: before this, `docs/DEVELOPMENT.md` §6 described gates that did not exist, and the db suite silently skipped without `DATABASE_URL`. |
+| **M1** Data & tenancy | Done | 20 tables, 71 policies, composite FKs. `supabase/tests/tenancy.sql` asserts isolation with the application bypassed. |
+| **M2** Ingest pipeline | Done, except OCR | Five extractors, `no_text_layer` path, version-guarded writes. OCR is still out of scope, as designed. |
+| **M3** Recall | Done, except the eval set | Grounding contract, refusal-without-LLM, `matched_arm`, SSE. `docs/RAG-PIPELINE.md` §5 describes an eval harness that has no populated question set — so "the answer is *good*", as opposed to *grounded*, remains unmeasured. |
+| **M4** Usable app | Done | Auth, documents, notes, search, streaming chat with citation chips, collections, dashboard. |
+| **M5** Connect | **Partly** | Extraction and graph reads exist. Entity **merge/rename** and save-answer-as-note do not: there is no endpoint for either. |
+| **M6** Harden & launch | **Partly** | Rate limiting and structured logs are real. Sentry, backup-restore drill, accessibility pass, latency measurement against the §6 budgets, and data export/account deletion are not done. |
+
+Two things this table exists to prevent:
+
+1. Reading a "design phase" header and assuming nothing is built when most of it is.
+2. Reading a finished checklist and assuming the unmeasured parts — retrieval *quality*, merge/rename, export — are done.
 
 ## Definition of done, per feature
 

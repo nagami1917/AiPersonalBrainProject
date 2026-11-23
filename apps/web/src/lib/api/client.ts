@@ -10,7 +10,7 @@
  */
 import { env } from '$lib/utils/env';
 import { getSupabase } from '$lib/api/supabase';
-import { API_PREFIX, joinOrigin } from '$lib/api/paths';
+import { API_PATH_PREFIX, joinOrigin } from '$lib/api/paths';
 
 /**
  * Resolve an API path to a URL the browser can fetch.
@@ -19,7 +19,7 @@ import { API_PREFIX, joinOrigin } from '$lib/api/paths';
  *
  *   absolute   `PUBLIC_API_BASE_URL=https://api.example.com` → joined directly.
  *              FastAPI must then allow the origin via CORS_ALLOWED_ORIGINS.
- *   relative   no base configured → `${API_PREFIX}${path}`, i.e.
+ *   relative   no base configured → `${API_PATH_PREFIX}${path}`, i.e.
  *              `/api/v1/...` on this origin, proxied to FastAPI in dev and
  *              same-origin in production. No CORS, no reachable localhost.
  *
@@ -28,7 +28,7 @@ import { API_PREFIX, joinOrigin } from '$lib/api/paths';
  * cannot be misconfigured into browsing `127.0.0.1` from a user's machine.
  */
 function apiUrl(path: string): string {
-  return env.apiBaseUrl ? joinOrigin(env.apiBaseUrl, path) : `${API_PREFIX}${path}`;
+  return env.apiBaseUrl ? joinOrigin(env.apiBaseUrl, path) : `${API_PATH_PREFIX}${path}`;
 }
 
 export class NexusApiError extends Error {

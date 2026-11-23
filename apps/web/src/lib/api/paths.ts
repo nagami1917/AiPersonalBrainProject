@@ -1,13 +1,14 @@
 /**
- * One definition of "what path do we send to FastAPI", used by both the
- * browser client and the dev proxy.
+ * One definition of "what path do we send to FastAPI", used by both the browser
+ * client and the same-origin proxy route.
  *
  * Two callers with different inputs:
  *
  *   - the browser passes `/v1/workspaces/{id}/notes` and needs it relative to
  *     the API base;
- *   - the dev proxy receives `/api/v1/workspaces/{id}/notes` from the browser and
- *     needs `/v1/workspaces/{id}/notes` to forward upstream.
+ *   - the proxy (`src/routes/api/v1/[...path]/+server.ts`) receives
+ *     `/api/v1/workspaces/{id}/notes` and needs `/v1/workspaces/{id}/notes` to
+ *     forward upstream.
  *
  * Rather than duplicating the two remappings, both come from `API_PREFIX`:
  * change the prefix in one place and the client and the proxy stay in step.

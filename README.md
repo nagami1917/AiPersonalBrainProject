@@ -51,22 +51,27 @@ apps/
                            notes, collections, search, graph, settings)
   api/
     app/
-      core/                config, JWT auth, dual DB clients, errors, logging
+      core/                config, JWT auth, dual DB clients, tenancy,
+                           rate limiting, upload validation, schema guards,
+                           errors, logging
       ai/                  chunking, extraction, retrieval, grounding, prompts
       api/routes/          documents, notes, collections, search, chat,
-                           conversations, graph, jobs
+                           conversations, graph, jobs, workspaces
       services/            retrieval + chat orchestration, storage
       repositories/        SQL, always on an RLS-bound connection
       workers/             queue, ingest pipeline, enrichment, entry point
     tests/
-      unit/                chunking, grounding contract, retrieval maths
-      db/                  RLS, grounding e2e, tenant isolation
+      unit/                chunking, grounding contract, retrieval maths,
+                           config aliases, schema guards
+      db/                  RLS, grounding e2e, tenant isolation, API contract
 supabase/
-  migrations/              0001–0011
-  seed.sql                 two users with near-identical vocabulary
+  migrations/              0001–0013
+  seed.sql                 three users with near-identical vocabulary
+  tests/tenancy.sql        raw-SQL isolation assertions (.github runs these)
+.github/workflows/ci.yml   lint, types, unit, db/RLS, build, env check
 docs/                      ARCHITECTURE · DATABASE · API · SECURITY ·
-                           DEVELOPMENT · RAG-PIPELINE · ROADMAP
-scripts/                   dev helpers
+                           DEVELOPMENT · RAG-PIPELINE · ROADMAP · DEPLOYMENT
+scripts/                   check.sh (all gates), check-env.sh (pre-deploy)
 ```
 
 ---
@@ -96,23 +101,26 @@ Sign in as `alice@nexus.local` / `password123` and ask *"Where do my deployment 
 
 **Real and tested**
 
-- 14 tables, 48 RLS policies, HNSW + GIN indexes, all migrations apply cleanly
-- `hybrid_search()` — RRF fusion with an absolute cosine-similarity gate
+- 20 tables, 71 RLS policies (67 on public tables, 4 on `storage.objects`), HNSW + GIN indexes; 13 migrations apply in order
+- `hybrid_search()` — RRF fusion with an absolute cosine-similarity gate, `security invoker`, so RLS applies inside it
 - AI layer split into pipeline stages (`ai/providers`, `ingestion`, `retrieval`, `rag`, `knowledge`, `summarization`)
 - Grounding contract: fabricated markers stripped, refusal path never calls the LLM
 - Postgres job queue: `SKIP LOCKED` claim, exponential backoff, dead-letter, staleness sweep
 - Ingest pipeline: download → extract (PDF/DOCX/TXT/MD/HTML) → clean/normalize → chunk (700/100) → embed → version-guarded write → summary + entities → mark completed
-- 35 API routes covering documents, notes, collections, tags, search, chat (SSE), conversations, graph, jobs
+- 53 API route handlers covering documents, notes, collections, tags, search, chat (SSE), conversations, graph, jobs, workspaces, audit
 - SvelteKit UI: auth, dashboard, streaming assistant with citation chips, documents with honest per-stage progress, notes, search with `matched_arm`, graph, settings
-- Verified: 113 unit tests, 19 database tests, 0 type errors, clean lint
+- Rate limiting wired at every provider-calling endpoint (`app/core/guard.py`), per user **and** per workspace
+- Role enforcement at 17 call sites: a `viewer` is refused writes with `insufficient_role`
+- Boot-time schema guards (`app/core/schema_guard.py`): a model/dimension disagreement with the `vector(1536)` column stops the process instead of failing on the first chunk
+- Verified: 261 unit tests, 99 database tests, 66 frontend unit tests, 0 type errors, clean lint
 
 **Stubbed or pending**
 
 - Entity/summary extraction runs but was validated with a fake LLM — needs a live provider to judge quality
-- Supabase `pg_trgm` path is isolated in migration `0010`; not exercised in the dev sandbox
+- `pg_trgm` is isolated in migration `0010`, which is the one migration a minimal Postgres can skip (suggestions degrade to exact-prefix matching)
 - No OCR: scanned PDFs fail loudly with `no_text_layer`
-- Rate limiting is specified and configured but not yet wired to a bucket store
-- Eval set scaffolding described in `docs/RAG-PIPELINE.md` §5 is not yet populated with real questions
+- Eval set described in `docs/RAG-PIPELINE.md` §5 is not yet populated with real questions
+- Entity merge/rename (ROADMAP M5) is not implemented: the graph reads entities, it cannot yet curate them
 
 ---
 
