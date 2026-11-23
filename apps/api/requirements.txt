@@ -19,3 +19,7 @@ pymupdf==1.24.14
 python-docx==1.1.2
 markdown-it-py==3.0.0
 beautifulsoup4==4.12.3
+# Optional at runtime: `error_tracking.py` degrades to a logged warning if this
+# is absent, so the image still boots without it. Pinned anyway so the shipped
+# image and the tested image are the same thing.
+sentry-sdk==2.19.2

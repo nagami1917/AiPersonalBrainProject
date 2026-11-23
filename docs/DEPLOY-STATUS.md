@@ -245,8 +245,111 @@ has been deleted so the history reflects only real schema work.
 3. **Rotate the database password** once the API is connected through the pooler,
    which does not need it in the frontend at all.
 4. **Close the remaining audit findings** tracked in #17 (per-process rate
-   limiting), #18 (`sentry_dsn` accepted but unused), #19 (`add_member`
-   404-vs-409), #23 (dev-only advisories), plus the absent backup/restore drill
-   and worker heartbeat in #20.
+   limiting), #19 (`add_member` 404-vs-409), #23 (dev-only advisories), plus the
+   absent backup/restore drill and worker heartbeat in #20. (#18, error
+   tracking, is now wired — see §7.)
 5. **Do not claim production readiness.** Per the audit's own rule, deployment
    checks (#20) must pass first, and the API is not deployed.
+
+## 7. Fixes applied while reviewing the deployable image
+
+Three defects were found by reading the code against the *deployment* shape
+rather than the local one. Each has a regression test in
+`apps/api/tests/unit/test_deployment_failures.py`, and each test was verified to
+**fail** with the fix reverted — a test that cannot fail is decoration.
+
+### 7.1 The pooler would have broken every query (fixed)
+
+`DEPLOYMENT.md` requires the **pooled** `DATABASE_URL` (:6543, Supavisor) because
+the direct port runs out of connections under `--workers 2` plus a worker. But
+`asyncpg` caches server-side prepared statements **per connection**, and the
+pooler multiplexes many clients onto a small set of backends. A statement
+prepared on backend A can be executed on backend B, which is exactly the
+condition that produces `DuplicatePreparedStatementError` /
+`InvalidSQLStatementNameError`.
+
+The pool is now created with `statement_cache_size=0`, which is what pgbouncer's
+documentation prescribes for `pool_mode=transaction`. **This would not have
+shown up locally or in CI**, because a direct connection never remultiplexes.
+
+### 7.2 The development CORS default survived into production (fixed)
+
+`CORS_ALLOWED_ORIGINS` defaults to `http://localhost:5173`. In production that
+rejects the browser's preflight — but only once the frontend calls the API,
+because Supabase auth itself is not CORS-bound. So login would appear to work and
+*every* subsequent request would fail, which is the most confusing possible
+presentation. `ENVIRONMENT=production` with the default now raises at boot with a
+message naming the variable.
+
+### 7.3 `SENTRY_DSN` was read and ignored (fixed)
+
+The setting existed; nothing consumed it. A deployment that set it believed it
+had error tracking while unhandled exceptions went to stdout and vanished with
+the machine. `app/core/error_tracking.py` now initialises the SDK when a DSN is
+present, filters the `/health` and `/ready` probes (Fly calls them every 15–30 s;
+reporting them would burn the quota on noise), and — deliberately — never lets
+Sentry break startup: no DSN, missing SDK, or a failing `init` all degrade to a
+logged warning.
+
+## 8. What breaks next, in the order you will hit it
+
+Predictions, not findings. Each is a real failure mode of this stack; the first
+two are near-certainties on first deploy.
+
+1. **Supabase auth `redirect_to` will silently fall back to the Site URL.** The
+   allow-list uses globs (`/**,`), and Supabase matches them as *patterns*, so
+   any route not covered — a note deep link, a `/settings` return path — is
+   dropped rather than rejected loudly. The user lands on the dashboard instead
+   of where they were. Cost: a confusing redirect, not data loss.
+
+2. **Email confirmation will rate-limit at about two messages per hour.** The
+   project is on the free plan using Supabase's built-in SMTP, which is
+   explicitly for testing. The third person to sign up in an hour gets a 429 and
+   no mail. Fix: custom SMTP (Resend/Postmark) before anyone outside the team
+   signs up.
+
+3. **`/ready` will flap the machine if the pooler briefly drops.** Fly restarts a
+   machine whose probe fails. `/ready` opens a connection each time, so a pooler
+   hiccup during a deploy turns into a restart loop. Consider a grace period or
+   making `/ready` tolerate one failed attempt.
+
+4. **Two `web` machines silently double the rate limit.** `RateLimiter` is a
+   per-process dict; the code and `/api/v1/meta` both say `distributed: false`.
+   `min_machines_running = 1`, so this is correct today — but scaling `web` for
+   load makes the limit 2× with no warning. Tracked as #17.
+
+5. **The worker will look healthy while doing nothing.** It has no HTTP surface
+   (by design), so a crashed worker shows up only as documents stuck in
+   `pending`. There is no heartbeat. This is the highest-value missing signal in
+   the system: `fly status` will say the app is up while every upload silently
+   never processes.
+
+6. **A slow upload will fail at five minutes.** Uploads go browser → Storage
+   directly, using a signed URL that expires after
+   `SIGNED_UPLOAD_TTL_SECONDS=300`. A 25 MiB file on a weak mobile connection is
+   comfortably slower than that, and the failure surfaces as an opaque storage
+   error with no resume — the user can only start over. Raise the TTL to match
+   the largest permitted file on the slowest connection you support.
+
+   (The key layout itself is safe: the API builds
+   `{workspace_id}/{document_id}/{filename}` server-side, so the bucket policy
+   can rely on segment 1 being the workspace id and a client cannot choose it.)
+
+7. **A 50 MiB upload will exceed the function/worker timeout.** The bucket allows
+   50 MiB, but ingest fetches, extracts, chunks and embeds in one job. A large
+   PDF with a slow provider can exceed `job_stale_after_seconds` (900 s) and be
+   retried — processing it twice and doubling the provider bill.
+
+8. **Reindexing is all-or-nothing and blocking.** A model change requires
+   `POST /embeddings/reindex` for every workspace, which re-embeds every chunk
+   with no progress reporting beyond the job row.
+
+9. **Switching Supabase to asymmetric signing keys would break auth instantly.**
+   `app/core/security.py` pins `_ALGORITHMS = ("HS256",)` and verifies with
+   `SUPABASE_JWT_SECRET`. Supabase is moving projects to asymmetric
+   (`RS256`/ES256) signing keys with a JWKS endpoint; the moment this project is
+   migrated — which the dashboard offers, and which also breaks `legacy` JWT
+   secrets — every inbound token fails verification and no one can log in.
+   Before pressing that button, add JWKS support and make the algorithm list
+   explicit rather than HS256-only. This is the single change most likely to
+   cause a total outage while looking like a routine settings toggle.
