@@ -26,8 +26,37 @@
    */
   import { goto } from '$app/navigation';
   import { session, sessionReady } from '$lib/stores/session';
-  import { loadWorkspaces } from '$lib/stores/workspace';
+  import {
+    loadWorkspaces,
+    activeWorkspaceId,
+    workspacesLoading,
+    workspacesError
+  } from '$lib/stores/workspace';
   import AppSidebar from '$lib/components/layout/AppSidebar.svelte';
+  import ErrorNotice from '$lib/components/ErrorNotice.svelte';
+
+  /**
+   * Whether a page may render.
+   *
+   * Every page in this group builds its request paths with `wsPath()`, which
+   * throws while no workspace is active. Rendering children before the
+   * workspace list has resolved therefore produces a distracting page-level
+   * error — "No workspace is selected." — on first paint, from code that is
+   * working correctly and is about to succeed.
+   *
+   * Worse, when the list genuinely fails (no reachable API) that per-page error
+   * is the *only* thing shown, once per page, and it points at the workspace
+   * selector rather than at the actual cause.
+   *
+   * So the shell withholds pages until there is an active workspace, and states
+   * the real reason when there is not. This is the one place every page is
+   * guaranteed to pass through; fixing it per page was tried and left the
+   * documents page still broken.
+   */
+  const blocked = $derived(
+    !$workspacesLoading && !$workspacesError && !$activeWorkspaceId ? 'no_workspace' : null
+  );
+  const canRenderPage = $derived(!!$activeWorkspaceId);
 
   let { children } = $props();
 
@@ -65,7 +94,37 @@
 
     <main class="min-w-0 flex-1">
       <div class="mx-auto max-w-5xl px-5 py-8">
-        {@render children()}
+        {#if $workspacesError}
+          <!--
+            The workspace list could not be fetched, so no page can work. The
+            cause is shown once here instead of separately in every panel, and
+            the code names the layer that failed: `api_unreachable` is a missing
+            API, not a missing workspace.
+          -->
+          <ErrorNotice
+            message={$workspacesError.message}
+            code={$workspacesError.code ?? 'workspaces_unavailable'}
+          />
+        {:else if blocked === 'no_workspace'}
+          <ErrorNotice
+            message="Your account has no workspace yet. Reload the page, or sign in again to finish setup."
+            code="no_workspace"
+          />
+        {:else if !canRenderPage}
+          <!--
+            Workspace list still in flight. Deliberately quiet: this is the
+            ordinary first-paint state, and an empty frame for a few hundred
+            milliseconds is less alarming than an error that disappears.
+          -->
+          <div class="flex items-center justify-center py-16" role="status" aria-live="polite">
+            <span
+              class="h-5 w-5 animate-spin rounded-full border-2 border-ink-700 border-t-accent-500"
+            ></span>
+            <span class="ml-3 text-sm text-ink-400">Opening your workspace…</span>
+          </div>
+        {:else}
+          {@render children()}
+        {/if}
       </div>
     </main>
   </div>

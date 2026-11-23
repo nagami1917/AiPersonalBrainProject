@@ -12,7 +12,7 @@
   import { apiFetch, NexusApiError } from '$lib/api/client';
   import { uploadWithProgress, UploadError } from '$lib/api/upload';
   import { getSupabaseSync } from '$lib/api/supabase';
-  import { wsPath } from '$lib/stores/workspace';
+  import { wsPath, activeWorkspaceId } from '$lib/stores/workspace';
   import type { Meta } from '$lib/api/types';
   import { cx } from '$lib/utils/cx';
   import { formatBytes } from '$lib/utils/format';
@@ -49,6 +49,21 @@
 
   async function handleFiles(files: FileList | null) {
     if (!files?.length) return;
+    // `wsPath()` throws while no workspace is active, and that throw used to
+    // surface as "No workspace is selected." next to the name of the file the
+    // user had just dropped. The layout now withholds pages in that state, so
+    // this is a second line of defence rather than the primary one: an upload
+    // drop zone that silently accepts a file it cannot possibly send is worse
+    // than one that refuses it immediately.
+    if (!$activeWorkspaceId) {
+      failures = [
+        {
+          name: files[0].name,
+          message: 'No workspace is open yet. Wait for the page to finish loading, then try again.'
+        }
+      ];
+      return;
+    }
     failures = [];
 
     for (const file of Array.from(files)) {
