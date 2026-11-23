@@ -21,6 +21,8 @@ from app.ai.ingestion import TARGET_TOKENS, ExtractionError
 from app.core.config import get_settings
 from app.workers import ingest
 
+from tests.db.support import rolled_back
+
 ALICE = "11111111-1111-1111-1111-111111111111"
 WORKSPACE = "(select id from public.workspaces where owner_id = $1 and personal limit 1)"
 
@@ -48,16 +50,27 @@ async def _pool_or_skip() -> asyncpg.Pool:
 
 @pytest.fixture
 async def conn() -> AsyncIterator[asyncpg.Connection]:
+    """A service-role connection whose writes are rolled back when the test ends.
+
+    `rolled_back` rather than `async with connection.transaction()`: the latter
+    COMMITS on a clean exit, so this fixture used to leave a `ready` document and
+    its chunks in the real corpus on every run (10 had accumulated). See
+    `tests/db/support.py` for the full account.
+    """
+    # The worker runs with the service role; these assertions are about pipeline
+    # behaviour, not tenancy (that is covered elsewhere). The worker connects with
+    # the service role and has no end-user JWT, so can_write_workspace() cannot be
+    # satisfied by auth.uid() — which is exactly why enqueue_job needs a service
+    # path (see 0006).
+    #
+    # The transaction is opened before the set_config call because the setting is
+    # is_local=true: outside a transaction it applies to its own statement only
+    # and evaporates, leaving the connection as its default superuser.
     pool = await _pool_or_skip()
     try:
-        async with pool.acquire() as connection, connection.transaction():
-            # The worker runs with the service role; these assertions are about
-            # pipeline behaviour, not tenancy (that is covered elsewhere).
-            # The worker connects with the service role and has no end-user JWT.
-            # can_write_workspace() therefore cannot be satisfied by auth.uid(),
-            # which is exactly why enqueue_job needs a service path (see 0006).
-            await connection.execute("select set_config('role','service_role',true)")
-            yield connection
+        async with pool.acquire() as connection, rolled_back(connection) as tx:
+            await tx.execute("select set_config('role','service_role',true)")
+            yield tx
     finally:
         await pool.close()
 
@@ -282,11 +295,21 @@ class TestArmExclusivity:
             pytest.skip("seed data missing: run `make db-reset` first")
 
         # Query with a real seeded vector so the vector arm has something true to find.
+        #
+        # `is not null` and the ORDER BY are both load-bearing. The seed inserts a
+        # `chunk_index = 9001` row for this document with a deliberately NULL
+        # embedding (it exists to prove the HNSW index tolerates an unembedded
+        # chunk), so an unordered `limit 1` could hand back a null and the test
+        # failed on `.strip()` — a test bug that looked like a retrieval bug. The
+        # ORDER BY makes the choice deterministic instead of depending on heap
+        # order, which changes after any ingest run.
         raw = await conn.fetchval(
             "select embedding::text from public.document_chunks "
-            "where workspace_id=$1 and document_id is not null limit 1",
+            "where workspace_id=$1 and document_id is not null and embedding is not null "
+            "order by chunk_index limit 1",
             workspace_id,
         )
+        assert raw is not None, "seed produced no embedded document chunk"
         vector = [float(x) for x in raw.strip("[]").split(",")]
 
         semantic = await self._hits(conn, str(workspace_id), mode="semantic", embedding=vector)

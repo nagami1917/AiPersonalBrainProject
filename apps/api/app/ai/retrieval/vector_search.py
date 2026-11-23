@@ -85,6 +85,10 @@ class SearchFilters:
     created_before: datetime | None = None
     source_ids: list[str] | None = None
     kind: str | None = None
+    # Tag name, matched case-insensitively against the parent's tags. Kept as a
+    # name rather than an id so the API contract does not require a caller to
+    # resolve an id first; the SQL resolves it once per query in the workspace.
+    tag: str | None = None
 
 
 async def vector(
@@ -122,5 +126,6 @@ async def vector(
         created_before=filters.created_before,
         source_ids=filters.source_ids,
         kind=filters.kind,
+        tag=filters.tag,
     )
     return [row_to_hit(row) for row in rows]

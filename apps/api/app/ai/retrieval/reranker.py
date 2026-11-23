@@ -82,6 +82,16 @@ def limit_per_source(hits: Sequence[Hit], max_share: float = 0.6) -> list[Hit]:
     return kept + overflow[: max(0, len(overflow) - len(kept))]
 
 
+def normalize_scores(scores: Sequence[float]) -> list[float]:
+    """The same rescaling as `normalize_fused_scores`, for callers holding only
+    score values rather than `Hit` objects — citations carry a float, not a Hit.
+    """
+    if not scores:
+        return []
+    best = max(scores) or 1.0
+    return [round(min(1.0, score / best), 4) for score in scores]
+
+
 def normalize_fused_scores(hits: Sequence[Hit]) -> list[float]:
     """Map raw RRF values (~0.01–0.03) to a 0–1 display range.
 
@@ -89,10 +99,7 @@ def normalize_fused_scores(hits: Sequence[Hit]) -> list[float]:
     users a meaningful "how much better than the rest" bar without implying a
     confidence we cannot compute.
     """
-    if not hits:
-        return []
-    best = max(h.fused_score for h in hits) or 1.0
-    return [round(min(1.0, h.fused_score / best), 4) for h in hits]
+    return normalize_scores([h.fused_score for h in hits])
 
 
 def order(hits: Sequence[Hit], *, limit: int) -> list[Hit]:

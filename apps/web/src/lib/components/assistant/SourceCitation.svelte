@@ -28,8 +28,25 @@
         : citation.source_title}
     </a>
     {#if citation.page}<span class="text-ink-500"> · p.{citation.page}</span>{/if}
-    {#if citation.score > 0}
-      <span class="text-ink-600"> · {Math.round(citation.score * 100)}% match</span>
+    <!--
+      A relative bar, not a percentage. The API publishes a rank-derived value
+      on a 0–1 scale where the best source is 1.0; printing "1% match" from it
+      (which is what the raw RRF score produced) was a fabricated measurement.
+      `relevance_kind` is asserted on so a future server change that introduces
+      a different unit cannot be silently rendered as this one.
+    -->
+    {#if citation.relevance_kind === 'relative'}
+      <span
+        class="ml-1 inline-block h-1 w-8 overflow-hidden rounded-full bg-ink-800 align-middle"
+        role="img"
+        aria-label="Relative relevance {Math.round(citation.relevance * 100)} of 100"
+        title="Relative to the best source for this answer"
+      >
+        <span
+          class="block h-full rounded-full bg-accent-500/70"
+          style="width: {Math.round(citation.relevance * 100)}%"
+        ></span>
+      </span>
     {/if}
     {#if citation.quote}
       <span class="mt-0.5 block truncate italic text-ink-500">“{citation.quote}”</span>

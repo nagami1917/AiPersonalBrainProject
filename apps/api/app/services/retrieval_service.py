@@ -53,6 +53,7 @@ def _filters(filters: RequestFilters | None) -> SearchFilters:
         created_before=filters.created_before,
         source_ids=filters.source_ids,
         kind=filters.kind,
+        tag=filters.tag,
     )
 
 

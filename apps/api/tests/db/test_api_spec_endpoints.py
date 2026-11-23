@@ -14,11 +14,13 @@ import uuid
 import asyncpg
 import pytest
 from app.core.config import get_settings
-from app.core.db import close_pool
+from app.core.db import close_pool, get_pool
 from app.core.deps import get_embedder, get_llm
 from app.main import create_app
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+
+from tests.db.support import cleanup_conversations
 
 ALICE = "11111111-1111-1111-1111-111111111111"
 BOB = "22222222-2222-2222-2222-222222222222"
@@ -62,6 +64,27 @@ async def _db_available() -> bool:
 async def require_db():
     if not await _db_available():
         pytest.skip("database unavailable")
+
+
+@pytest.fixture(autouse=True)
+async def sweep_conversations(client, require_db):
+    """Remove the conversations these tests create through the real app pool.
+
+    The `client` fixture drives the FastAPI app, so every `/ai/chat` call commits
+    through the application's own pool — there is no test transaction. Without
+    this sweep each run left 8 conversations (and their messages) behind, which
+    are then returned by `GET /conversations` and are searchable content, so they
+    pollute both later assertions and retrieval.
+
+    Depends on `client` on purpose: fixture teardown is the reverse of setup, so
+    without the dependency this sweeps AFTER the client closes the pool and every
+    test errors with "pool is closed". Declaring the dependency puts the sweep
+    first in teardown order, while the pool is still open.
+    """
+    yield
+    pool = await get_pool(get_settings())
+    async with pool.acquire() as conn:
+        await cleanup_conversations(conn)
 
 
 async def _workspace_of(user_id: str) -> str:
@@ -431,6 +454,97 @@ class TestAiChat:
                 break
         # sources arrive before any generated text
         assert "event: sources" in first
+
+
+class TestCitationShape:
+    """The citation contract, at the HTTP boundary.
+
+    The spec lists what a citation must contain. The regression these guard is
+    `score`: the API published the raw RRF value (~0.011) and the UI rendered it as
+    "1% match" for every source, including the best one. A number that is really a
+    rank signal, labelled as a confidence, is a fabricated measurement.
+    """
+
+    async def test_a_citation_carries_every_field_the_spec_names(self, client):
+        workspace = await _workspace_of(ALICE)
+        response = await client.post(
+            "/api/v1/ai/chat",
+            headers=_auth(),
+            json={"workspace_id": workspace, "question": "Where is the service role key stored?"},
+        )
+        assert response.status_code == 200
+        citations = response.json()["citations"]
+        assert citations
+
+        citation = citations[0]
+        for field in ("chunk_id", "source_id", "source_title", "quote", "relevance"):
+            assert field in citation, f"a citation must carry {field}"
+        # Page is present as a key and may legitimately be null for a note.
+        assert "page" in citation
+        assert citation["chunk_id"] and citation["source_id"]
+        assert citation["quote"], "a citation without retrieved content is not verifiable"
+
+    async def test_relevance_is_relative_and_published_with_its_unit(self, client):
+        workspace = await _workspace_of(ALICE)
+        response = await client.post(
+            "/api/v1/ai/chat",
+            headers=_auth(),
+            json={"workspace_id": workspace, "question": "Where is the service role key stored?"},
+        )
+        citations = response.json()["citations"]
+        assert citations
+
+        best = max(c["relevance"] for c in citations)
+        assert best > 0.5, (
+            "the top citation reported a raw RRF value (~0.01) before this fix, "
+            "which the UI rendered as '1% match'"
+        )
+        assert all(
+            c["relevance_kind"] == "relative" for c in citations
+        ), "the unit must travel with the number so a client cannot guess it wrong"
+        assert all(0.0 <= c["relevance"] <= 1.0 for c in citations)
+
+    async def test_replaying_a_conversation_keeps_relevance_relative(self, client):
+        """A reloaded conversation must show the same relevance scale as a live one.
+
+        The stored column is the raw RRF value, so the replay path had the same
+        "1% match" bug as the live one — and a defect that only appears after a
+        refresh is the kind that survives review.
+        """
+        workspace = await _workspace_of(ALICE)
+        asked = await client.post(
+            "/api/v1/ai/chat",
+            headers=_auth(),
+            json={"workspace_id": workspace, "question": "Where is the service role key stored?"},
+        )
+        conversation_id = asked.json()["conversation_id"]
+
+        replayed = await client.get(f"/api/v1/conversations/{conversation_id}", headers=_auth())
+        assert replayed.status_code == 200
+        messages = [m for m in replayed.json()["messages"] if m["role"] == "assistant"]
+        assert messages
+        citations = messages[-1]["citations"]
+        assert citations, "a grounded answer replays its citations"
+        assert (
+            max(c["relevance"] for c in citations) > 0.5
+        ), "replay must rescale, or a refresh changes what the numbers mean"
+        assert all(c["relevance_kind"] == "relative" for c in citations)
+
+    async def test_a_conversation_is_titled_for_the_history_list(self, client):
+        workspace = await _workspace_of(ALICE)
+        asked = await client.post(
+            "/api/v1/ai/chat",
+            headers=_auth(),
+            json={"workspace_id": workspace, "question": "What is in my notes?"},
+        )
+        conversation_id = asked.json()["conversation_id"]
+
+        listed = await client.get("/api/v1/conversations", headers=_auth())
+        assert listed.status_code == 200
+        titles = {c["id"]: c["title"] for c in listed.json()}
+        assert titles.get(
+            conversation_id
+        ), "a conversation with a null title is not navigable; nothing used to write it"
 
 
 class TestAiSummarize:

@@ -22,6 +22,7 @@ from app.api.routes import (
     collections,
     conversations,
     documents,
+    embeddings,
     graph,
     jobs,
     notes,
@@ -50,6 +51,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # request. A width mismatch here is a deploy that would have failed later,
     # one chunk at a time, with a misleading retry loop.
     await verify_schema(pool, settings)
+
+    # Drift warning. `verify_schema` catches a model whose *width* cannot fit
+    # the column and refuses to boot; this catches the case that boots fine and
+    # is worse — a model swap at the same width, which leaves old vectors being
+    # ranked against new query vectors. Nothing can fix that at startup (it is
+    # thousands of embedding calls), so it is reported loudly and the operator
+    # runs POST …/embeddings/reindex.
+    #
+    # Wrapped in a broad except: a failed count must never prevent the API from
+    # serving. It is a warning, not a guard.
+    try:
+        from app.services.reindex_service import needs_reindex_anywhere
+
+        async with pool.acquire() as conn:
+            stale = await needs_reindex_anywhere(conn, settings)
+        if stale:
+            log.warning(
+                "embedding model drift: %d chunk(s) were indexed with a model other than %s. "
+                "Retrieval quality is degraded until they are reprocessed — "
+                "POST /api/v1/workspaces/{id}/embeddings/reindex with {confirm:true}.",
+                stale,
+                settings.pinned_embedding_model,
+            )
+    except Exception as exc:  # noqa: BLE001 - never block startup on a warning
+        log.debug("embedding drift check skipped: %s", exc)
+
     try:
         yield
     finally:
@@ -95,6 +122,7 @@ def create_app() -> FastAPI:
         jobs,
         auth,
         ai,
+        embeddings,
     ):
         app.include_router(module.router, prefix=API_PREFIX)
     app.include_router(collections.tags_router, prefix=API_PREFIX)

@@ -278,6 +278,24 @@ event: error      data: {"code":"…","message":"…"}
 ```
 Sources arrive first so the UI can display "reading 3 sources" honestly rather than faking it after the fact. Markers are resolved post-hoc, so deltas may stream `[1]` before the citation payload lands — the client renders markers as pending chips until `citations` arrives.
 
+**The release rule: nothing is emitted until the model has cited a real source.** This is enforced
+by `ai/rag/stream_guard.py`, not by convention.
+
+The original implementation streamed every delta and resolved citations afterwards, which meant a
+model that invented `[9]` — or answered with no citation at all — had already been read by the
+time the `citations` event reported `grounded: false`. The persisted message was the refusal, so the
+database and the screen disagreed, and the screen is what the user reads. An answer with no marker
+was never retracted, because there was no complete marker to notice.
+
+The gate holds everything back until a marker resolves to a retrieved chunk. A grounded answer
+therefore releases its first chunk as soon as its first valid citation appears (typically the first
+sentence), and fabrications appearing *after* that are stripped mid-stream so the screen matches the
+transcript. An ungrounded answer emits nothing, and the refusal is sent in its place — a correct
+substitution rather than a contradiction of text already on screen.
+
+The trade-off is deliberate: buffering the whole answer would guarantee grounding but add a full
+generation of latency to every turn, and the gate only ever withholds until the first citation.
+
 ---
 
 ## 5. Evaluation
@@ -292,6 +310,13 @@ The pipeline is only as good as its measurable behaviour. Before any tuning, bui
 | Exact-match | Identifiers, names, error codes | Keyword-arm necessity proof |
 
 Run it on every change to chunking, fusion weights, prompt, or model. Store results in the repo so regressions are visible in diffs.
+
+Implemented as `apps/api/tests/db/test_rag_evaluation.py`: one class per set above, each case
+naming its expected source. It runs in CI against the seeded corpus, so a change to the floor,
+the fusion weights or an arm shows up as a failing expectation rather than as a vague sense that
+answers got worse. The embedder there is the deterministic `FakeEmbedder`, which measures the
+*pipeline* (filters, fusion, gates, citation resolution) and not model quality — real vector
+quality needs a labelled corpus and a nightly run against the live provider.
 
 ---
 

@@ -13,12 +13,14 @@ import asyncpg
 import pytest
 from app.core import ratelimit
 from app.core.config import get_settings
-from app.core.db import close_pool
+from app.core.db import close_pool, get_pool
 from app.core.deps import get_embedder, get_llm
 from app.core.ratelimit import Limit, RateLimiter
 from app.main import create_app
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+
+from tests.db.support import cleanup_conversations
 
 ALICE = "11111111-1111-1111-1111-111111111111"
 BOB = "22222222-2222-2222-2222-222222222222"
@@ -43,6 +45,20 @@ async def client(embedder, llm):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://api.test") as http:
         yield http
     await close_pool()
+
+
+@pytest.fixture(autouse=True)
+async def sweep_conversations(client):
+    """Remove conversations these tests create through the real app pool.
+
+    Same reason as in `test_api_spec_endpoints.py`: the `client` fixture drives
+    the application, whose writes commit. Depends on `client` so teardown runs
+    while the pool is still open.
+    """
+    yield
+    pool = await get_pool(get_settings())
+    async with pool.acquire() as conn:
+        await cleanup_conversations(conn)
 
 
 @pytest.fixture

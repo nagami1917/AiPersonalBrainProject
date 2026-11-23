@@ -87,7 +87,28 @@ PINNED_EMBEDDING_MODEL=text-embedding-3-small
 PINNED_EMBEDDING_DIM=1536
 CORS_ALLOWED_ORIGINS=http://localhost:5173
 MAX_UPLOAD_SIZE_MB=25
+TRASH_RETENTION_DAYS=30
 ```
+
+### Changing the embedding model
+
+`PINNED_EMBEDDING_MODEL` and `PINNED_EMBEDDING_DIM` are a **pair**, and changing them is a
+migration, not a redeploy. `document_chunks.embedding` is `vector(1536)` with an HNSW index built
+for one width; `core/schema_guard.py` compares the configured dimension against
+`public.embedding_dim()` at boot and refuses to start on a mismatch, rather than letting ingest
+fail one chunk at a time under a misleading retry loop.
+
+A swap at the **same** width boots cleanly and is the more dangerous case: the old vectors stay in
+the index and keep being ranked against new query vectors, which silently degrades answers instead
+of failing. After such a change:
+
+1. `GET /api/v1/workspaces/{id}/embeddings/health` — `state: "mixed"` means stale vectors remain.
+2. `GET …/embeddings` — how many chunks and sources are affected.
+3. `POST …/embeddings/reindex` with `{"confirm": true}` — queues one `reindex` job per stale
+   source. Idempotent, so it can be re-run; `limit` caps a batch.
+
+The API also logs a `embedding model drift` warning at startup when any chunk was indexed with
+another model, so the condition is visible in a deploy log rather than only in a support ticket.
 
 **Frontend** (`apps/web/.env.local`, and Vercel environment):
 
