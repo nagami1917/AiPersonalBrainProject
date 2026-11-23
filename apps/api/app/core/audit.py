@@ -24,6 +24,34 @@ insert rolling back a successful delete — inverts the priority: the user's
 intent succeeded, and losing the log entry is the smaller harm. It is logged at
 ERROR so a silently broken audit trail is visible in logs, which is where
 someone would look.
+
+## …but swallowing the exception is not enough, and used not to be
+
+Catching the error keeps the *route* from raising; it does not keep the
+*transaction* from being poisoned. In Postgres a failed statement aborts the
+whole transaction, and every later statement returns `25P02` until it is rolled
+back. So the old implementation produced the worst possible outcome:
+
+    DELETE 1                    -- the user's operation succeeded
+    select record_audit(...)    -- raises, caught, logged
+    COMMIT                      -- issues ROLLBACK: the transaction is aborted
+    -> HTTP 204                 -- the client is told it worked
+
+Neither outcome the docstring promised. It was tested end to end through
+`DELETE /workspaces/{id}/members/{me}`: the route returned 204 and the
+membership row was still there afterwards. Every audited route shared the bug,
+because all of them call `record` as their last statement.
+
+`record` now runs the insert inside a SAVEPOINT. A failure rolls back to the
+savepoint, which clears the aborted state while leaving everything the route did
+before it intact — so the operation really does commit, and the only thing lost
+is the log entry. Two cases are deliberately *not* swallowed:
+
+  * no connection / no transaction (`asyncpg.InterfaceError`,
+    `asyncpg.NoActiveSQLTransactionError`) — caller error, and silently skipping
+    the audit would hide it;
+  * a connection that has already gone away (`ConnectionDoesNotExistError`) —
+    there is no transaction left to save.
 """
 
 from __future__ import annotations
@@ -98,37 +126,45 @@ async def record(
     detail: dict[str, Any] | None = None,
     request_id: str | None = None,
 ) -> None:
-    """Append one audit entry. Never raises.
+    """Append one audit entry. Never poisons the caller's transaction.
 
     `conn` must be the caller's user connection: `record_audit` derives the
     actor from the JWT claim on that session, so a service-role connection would
     have no actor and the function would refuse.
+
+    Wrapped in a SAVEPOINT so that a refused audit entry costs the log line and
+    nothing else. Without it, catching the exception is not sufficient: the
+    transaction stays aborted and `COMMIT` silently becomes a rollback, which is
+    how a 204 used to be returned for a delete that did not happen.
     """
     try:
-        await conn.fetchval(
-            """select public.record_audit(
-                 p_workspace_id => $1::uuid,
-                 p_action       => $2,
-                 p_target_type  => $3,
-                 p_target_id    => $4::uuid,
-                 p_target_label => $5,
-                 p_detail       => $6::jsonb,
-                 p_request_id   => $7)""",
-            workspace_id,
-            action,
-            target_type,
-            target_id,
-            target_label,
-            # The dict, not json.dumps(dict). asyncpg encodes a `dict` for a
-            # jsonb parameter as a JSON *object*; handing it a pre-serialised
-            # string makes it a JSON string, so `detail` came back as "{}" and
-            # every reader would have to parse it again.
-            scrub(detail),
-            request_id,
-        )
+        async with conn.transaction():
+            await conn.fetchval(
+                """select public.record_audit(
+                     p_workspace_id => $1::uuid,
+                     p_action       => $2,
+                     p_target_type  => $3,
+                     p_target_id    => $4::uuid,
+                     p_target_label => $5,
+                     p_detail       => $6::jsonb,
+                     p_request_id   => $7)""",
+                workspace_id,
+                action,
+                target_type,
+                target_id,
+                target_label,
+                # The dict, not json.dumps(dict). asyncpg encodes a `dict` for a
+                # jsonb parameter as a JSON *object*; handing it a pre-serialised
+                # string makes it a JSON string, so `detail` came back as "{}" and
+                # every reader would have to parse it again.
+                scrub(detail),
+                request_id,
+            )
     except Exception:
         # Deliberately broad: a broken audit insert must not break the request,
-        # and any narrower catch would let an unexpected error escape.
+        # and any narrower catch would let an unexpected error escape. The
+        # savepoint has already unwound the failed statement, so the caller's
+        # transaction is usable again by the time this returns.
         log.exception(
             "audit write failed",
             extra={"workspace_id": workspace_id, "action": action},

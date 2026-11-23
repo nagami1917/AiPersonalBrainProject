@@ -365,7 +365,14 @@ async def remove_member(
     member_id: str, ctx: WorkspaceCtx, conn: UserConn, self_user: CurrentUser
 ) -> Response:
     """Remove a member, or leave yourself. The owner cannot be removed."""
-    if member_id != ctx.id and not ctx.can_manage:
+    # `member_id` is a *user* id, so the comparison is against the caller's own
+    # id — not `ctx.id`, which is the workspace. Comparing the two (they are both
+    # uuid strings, so nothing complained) made this condition unconditionally
+    # true: every caller was treated as removing somebody else, which meant a
+    # member or viewer could never leave a workspace through the API at all.
+    # They got a 403 telling them only owners and admins can remove members,
+    # from a route whose docstring says "or leave yourself".
+    if member_id != self_user.id and not ctx.can_manage:
         from app.core.errors import Forbidden
 
         raise Forbidden("Only owners and admins can remove members", code="insufficient_role")
@@ -375,18 +382,32 @@ async def remove_member(
     # "remove". Same SQL, different fact — and an audit trail that cannot tell
     # them apart answers the wrong question.
     action = "workspace.member.leave" if member_id == self_user.id else "workspace.member.remove"
-    result = await conn.execute(
-        "delete from public.workspace_members where workspace_id=$1 and user_id=$2",
+
+    # Determine membership *before* deleting, because the order decides whether
+    # the audit entry survives. `record_audit` requires the actor to still be a
+    # member of the workspace, so auditing after a leave always fails — and the
+    # entry that disappears is precisely the one for the most security-relevant
+    # action here. The DELETE is harmless when the row is absent, so this check
+    # is also the "member not found" 404, which used to come from the command tag.
+    exists = await conn.fetchval(
+        "select exists(select 1 from public.workspace_members "
+        "where workspace_id=$1 and user_id=$2)",
         ctx.id,
         member_id,
     )
-    if not str(result).endswith("1"):
+    if not exists:
         raise NotFound("Member not found")
+
     await audit.record(
         conn,
         workspace_id=ctx.id,
         action=action,
         target_type="member",
         target_id=member_id,
+    )
+    await conn.execute(
+        "delete from public.workspace_members where workspace_id=$1 and user_id=$2",
+        ctx.id,
+        member_id,
     )
     return Response(status_code=204)

@@ -325,9 +325,28 @@ It reports which spelling satisfied each requirement, so an operator can see tha
 ## 6. Verifying a deployment
 
 ```bash
-curl -fsS https://nexus-api.fly.dev/health
+curl -fsS https://nexus-api.fly.dev/health   # liveness: process only
+curl -fsS https://nexus-api.fly.dev/ready    # readiness: touches the database
 curl -fsS https://nexus-api.fly.dev/api/v1/meta | jq .rate_limits
 ```
+
+The two probes answer different questions and are both wired into `fly.toml`:
+
+| Endpoint | Question | On failure |
+| --- | --- | --- |
+| `/health` | Is the process running? | — (never depends on the DB) |
+| `/ready` | Can it serve a request *now*? | `503` + `{"database": "unreachable"}` |
+
+`/health` deliberately does **not** touch the database. If it did, a 30-second
+database blip would make every healthy API machine fail its check and restart,
+turning a short outage into a long one. `/ready` is the one that queries
+Postgres, and it is what decides whether Fly routes traffic to an instance.
+
+Before this split, `/health` returned `{"status": "ok"}` unconditionally — it
+answered 200 with the connection string pointed at a closed port, so a deploy
+whose database credentials were wrong passed its health check and failed every
+real request. If you are debugging a deploy that "is up" but serves nothing,
+`/ready` is the endpoint that tells the truth.
 
 `/api/v1/meta` is the capability document: supported MIME types, upload limit,
 embedding model, and the rate-limit budget. If the frontend renders but every

@@ -1,12 +1,20 @@
+# `python-multipart` was removed deliberately, not by accident: nothing in this
+# API parses multipart bodies. Uploads go browser -> Supabase Storage directly
+# (the bytes never touch FastAPI), and every endpoint takes JSON. It had
+# accumulated seven advisories, including two DoS issues in multipart parsing and
+# a negative-Content-Length read in parse_form() — all in code paths this app
+# never executes. An unused dependency cannot be reached, but it is still attack
+# surface in the supply chain and noise in every future audit, so it is gone. If
+# a multipart endpoint is ever added, FastAPI needs it back and it must be
+# >= 0.0.31.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
-python-jose[cryptography]==3.3.0
+python-jose[cryptography]==3.5.0
 httpx==0.28.1
 asyncpg==0.30.0
 pgvector==0.3.6
-python-multipart==0.0.20
 pymupdf==1.24.14
 python-docx==1.1.2
 markdown-it-py==3.0.0

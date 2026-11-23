@@ -226,6 +226,14 @@ jobs:
       - name: Raw tenancy assertions
         run: psql -v ON_ERROR_STOP=1 -q -d nexus -f supabase/tests/tenancy.sql
 
+      - name: Ownership cannot be escalated
+        # Migration 0019's regression test. Runs after tenancy.sql on purpose:
+        # that file grants `authenticated` blanket UPDATE for its own fixtures,
+        # so this one exercises the RLS policies and trigger under *more*
+        # privilege than production has — proving they hold on their own merit
+        # and are not merely being carried by the column grant.
+        run: psql -v ON_ERROR_STOP=1 -q -d nexus -f supabase/tests/ownership_guard.sql
+
       - name: database tests
         working-directory: apps/api
         run: pytest -q tests/db

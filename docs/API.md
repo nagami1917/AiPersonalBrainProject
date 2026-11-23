@@ -102,7 +102,8 @@ for a write that creates storage objects is not a convenience worth having.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness. No auth. Returns `{status, version, commit}` |
+| `GET` | `/health` | Liveness. No auth. Returns `{status, version}`. Does not touch the database, so a database outage cannot restart a healthy process |
+| `GET` | `/ready` | Readiness. No auth. Returns `{status, version, database}` — `200` when a database round-trip succeeds, `503` with `database: "unreachable"` when it does not. This is the probe `fly.toml` routes traffic on |
 | `GET` | `/api/v1/meta` | Public capability document: supported file types, size limits, embedding model id, feature flags. The frontend uses this to avoid hardcoding limits |
 
 ---

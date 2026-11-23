@@ -7,12 +7,14 @@ rather than a 500 on the first request.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes import (
     ai,
@@ -137,7 +139,49 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
+        """Liveness only: is this process running and able to answer?
+
+        Deliberately does not touch the database. This is the endpoint Fly's
+        health check polls every 30s, and a liveness probe that depends on a
+        downstream service will restart a perfectly healthy process when that
+        service blips — turning a 30-second database hiccup into a rolling
+        restart. Use `/ready` to ask whether the API can actually serve.
+        """
         return {"status": "ok", "version": settings.api_version}
+
+    @app.get("/ready", tags=["meta"])
+    async def ready() -> JSONResponse:
+        """Readiness: can this instance serve a request *right now*?
+
+        Verified against a live pool rather than assumed: the old `/health`
+        returned `ok` with a DSN pointing at a closed port, so a deploy whose
+        database credentials were wrong would report healthy while every real
+        request failed. A probe that cannot fail is not a probe.
+
+        Returns 503 with a machine-readable reason on failure, so an operator
+        (or `curl -f` in DEPLOYMENT.md) sees why rather than a bare 500.
+        """
+        try:
+            pool = await get_pool(settings)
+            # A cheap round-trip that proves a connection can be acquired and a
+            # query can run — not a cached object in process memory.
+            await asyncio.wait_for(pool.fetchval("select 1"), timeout=2.0)
+        except Exception as exc:  # noqa: BLE001 — any failure is "not ready"
+            # The message is a class name, never the exception text: a DSN parse
+            # error can quote the connection string, which contains a password.
+            log.warning("readiness check failed (%s)", type(exc).__name__)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "version": settings.api_version,
+                    "database": "unreachable",
+                },
+            )
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ok", "version": settings.api_version, "database": "ok"},
+        )
 
     @app.get(f"{API_PREFIX}/meta", tags=["meta"])
     async def meta() -> dict[str, object]:

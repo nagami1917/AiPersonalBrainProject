@@ -21,7 +21,15 @@ insert into auth.users (id, email, raw_user_meta_data) values
   ('cccccccc-3333-3333-3333-333333333333','rls-carol@nexus.test','{"full_name":"RLS Carol"}')
 on conflict (id) do nothing;
 
+-- `0011_grants.sql` already grants exactly what `authenticated` should have.
+-- This line used to re-grant blanket UPDATE to hide an ordering problem on a
+-- bare Postgres, and it silently undid migration 0019's column-level grant on
+-- `workspaces.owner_id` — so the suite ran with *more* privilege than
+-- production, and `ownership_guard.sql` failed for a reason production would
+-- never have. Granting what production grants keeps the test honest:
 grant select, insert, update, delete on all tables in schema public to authenticated;
+revoke update on public.workspaces from authenticated;
+grant update (name, slug, metadata, personal) on public.workspaces to authenticated;
 
 \echo '== signup trigger created one personal workspace + owner membership each =='
 select p.display_name, w.name as workspace, wm.role
