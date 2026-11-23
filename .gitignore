@@ -1,7 +1,11 @@
 # --- secrets -----------------------------------------------------------------
 .env
 .env.*
+# Templates are committed, real values are not. The negation is repeated with a
+# `**/` form so an app-level example (apps/web, apps/api) is trackable too — the
+# bare `!.env.example` only un-ignores the repository root.
 !.env.example
+!**/.env.example
 *.pem
 *.key
 

@@ -44,10 +44,11 @@ Three deployables, one database, one image for both backend processes.
 ### First run
 
 ```bash
-cp .env.example .env          # fill in SUPABASE_* after `supabase start`
-make install                  # backend venv + npm install
+make install                  # creates apps/api/.env and apps/web/.env.local
+                              # from their templates, then installs deps
+# fill in SUPABASE_* after `supabase start` (see DEPLOYMENT.md §2)
 supabase start                # local Postgres, Auth, Storage (docker)
-make db-reset                 # apply migrations 0001–0011 + seed.sql
+make db-reset                 # apply all migrations + seed.sql
 make dev                      # API :8000 + web :5173
 ```
 
@@ -183,13 +184,14 @@ fly secrets set \
 ## 5. Vercel
 
 - Root directory: `apps/web`. Framework: SvelteKit (`@sveltejs/adapter-vercel`, node 20).
-- Environment (Production **and** Preview scopes separately):
+- Environment (Production **and** Preview scopes separately) — full procedure in
+  [DEPLOYMENT.md](DEPLOYMENT.md) §4.3:
 
 | Variable | Value |
 |---|---|
 | `PUBLIC_SUPABASE_URL` | project URL |
 | `PUBLIC_SUPABASE_ANON_KEY` | anon key |
-| `PUBLIC_API_BASE_URL` | `https://nexus-api.fly.dev` |
+| `PUBLIC_API_BASE_URL` | `https://nexus-api.fly.dev`, or empty for same-origin `/api/v1` |
 
 - **A service-role key, AI key, or `DATABASE_URL` in Vercel is a security bug**, not a configuration choice. `apps/web/src/lib/utils/env.ts` only reads `PUBLIC_*` names.
 - CORS on the API must list the Vercel domains explicitly (`CORS_ALLOWED_ORIGINS`); never `*` with credentials.
@@ -249,9 +251,11 @@ Daily Supabase backups; PITR on a paid tier once the data is irreplaceable. Run 
 | `MIN_SIMILARITY` | ✅ | — | — | 0.25 |
 | `SCORE_FLOOR` | ✅ | — | — | 0.008 |
 | `VECTOR_WEIGHT` / `KEYWORD_WEIGHT` / `RRF_K` | ✅ | — | — | 1.0 / 0.7 / 60 |
-| `MAX_UPLOAD_BYTES` | ✅ | — | — | 50 MB |
-| `CORS_ALLOWED_ORIGINS` | ✅ | — | — | localhost:5173 |
+| `MAX_UPLOAD_BYTES` / `MAX_UPLOAD_SIZE_MB` | ✅ | — | — | 25 MB (from `…_SIZE_MB`) |
+| `CORS_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS` | ✅ | — | — | localhost:5173 |
 | `WORKER_CONCURRENCY` | — | ✅ | — | 2 |
 | `PUBLIC_*` | — | — | ✅ | — |
 
-`config.py` rejects a `PINNED_EMBEDDING_DIM` that disagrees with the pinned model — a mismatch produces vectors that look fine and retrieve nothing.
+`config.py` rejects a `PINNED_EMBEDDING_DIM` that disagrees with the pinned model — a mismatch produces vectors that look fine and retrieve nothing. Where the spec names a variable differently (`SUPABASE_DB_URL`, `AI_API_KEY`, `AI_MODEL`, `EMBEDDING_MODEL`, `ALLOWED_ORIGINS`, `MAX_UPLOAD_SIZE_MB`), both spellings are accepted; the full table is in [DEPLOYMENT.md](DEPLOYMENT.md) §2.2.
+
+Environment files are split: `apps/api/.env` holds secrets, `apps/web/.env.local` holds `PUBLIC_*` values only. Neither is committed; both have a tracked `.env.example`.
