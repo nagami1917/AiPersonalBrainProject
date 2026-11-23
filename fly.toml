@@ -38,6 +38,19 @@ kill_timeout = "30s"
     soft_limit = 200
     hard_limit = 250
 
+# Two probes, deliberately different questions.
+#
+# `/ready` (readiness) touches the database, so Fly only routes traffic to an
+# instance that can actually serve. `/health` (liveness) is process-only, so a
+# short database outage does not get a healthy image restarted in a loop —
+# which is what a database-backed health check would cause.
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "15s"
+  method = "GET"
+  timeout = "3s"
+  path = "/ready"
+
 [[http_service.checks]]
   grace_period = "10s"
   interval = "30s"

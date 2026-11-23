@@ -87,9 +87,7 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     """
     import json
 
-    await conn.set_type_codec(
-        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
-    )
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
 @pytest.fixture
@@ -180,9 +178,7 @@ async def _audit_mark(pool: asyncpg.Pool) -> int:
     return await pool.fetchval("select coalesce(max(id), 0) from public.audit_events")
 
 
-async def _audit_since(
-    pool: asyncpg.Pool, mark: int, action: str
-) -> asyncpg.Record | None:
+async def _audit_since(pool: asyncpg.Pool, mark: int, action: str) -> asyncpg.Record | None:
     """The newest entry for `action` written after `mark`, if any."""
     return await pool.fetchrow(
         "select action, actor_id::text as actor, target_id::text as target "
@@ -205,9 +201,9 @@ async def test_a_non_manager_can_leave_a_workspace(client, pool, alice_ws, role)
     response = await client.delete(
         f"/api/v1/workspaces/{alice_ws}/members/{CAROL}", headers=_auth(CAROL)
     )
-    assert response.status_code == 204, (
-        f"a {role} could not leave: {response.status_code} {response.text}"
-    )
+    assert (
+        response.status_code == 204
+    ), f"a {role} could not leave: {response.status_code} {response.text}"
     assert await _role(pool, alice_ws, CAROL) is None, "204 was returned but the row survived"
 
 
@@ -306,9 +302,7 @@ async def test_a_failed_audit_does_not_silently_roll_back_the_operation(pool):
     Driven with a deliberately impossible audit call (an actor who is not a
     member) rather than by mocking, so the real failure path is exercised.
     """
-    ws = await pool.fetchval(
-        "select id from public.workspaces where owner_id = $1 limit 1", ALICE
-    )
+    ws = await pool.fetchval("select id from public.workspaces where owner_id = $1 limit 1", ALICE)
     note_id = await pool.fetchval(
         "insert into public.notes (workspace_id, created_by, title, content) "
         "values ($1,$2,'audit probe','x') returning id",
@@ -322,15 +316,16 @@ async def test_a_failed_audit_does_not_silently_roll_back_the_operation(pool):
         # Act as a signed-in user who is not a member of the workspace.
         await conn.execute("set local role authenticated")
         await conn.execute("select set_config('request.jwt.claim.sub', $1, true)", DAVE)
-        await conn.execute(
-            "select set_config('request.jwt.claim.role', 'authenticated', true)"
-        )
+        await conn.execute("select set_config('request.jwt.claim.role', 'authenticated', true)")
         try:
             # A write the caller is not entitled to is impossible via RLS, so use
             # a superuser-visible no-op to stand in for "the route's real work":
             # what is being tested is that `record` does not poison the tx.
             await audit.record(
-                conn, workspace_id=str(ws), action="note.delete", target_type="note",
+                conn,
+                workspace_id=str(ws),
+                action="note.delete",
+                target_type="note",
                 target_id=str(note_id),
             )
             # If the savepoint works, this still runs and the commit is real.
@@ -350,9 +345,7 @@ async def test_a_failed_audit_does_not_silently_roll_back_the_operation(pool):
 
 async def test_audit_record_succeeds_for_a_member(pool):
     """The positive half: the savepoint must not swallow successful writes."""
-    ws = await pool.fetchval(
-        "select id from public.workspaces where owner_id = $1 limit 1", ALICE
-    )
+    ws = await pool.fetchval("select id from public.workspaces where owner_id = $1 limit 1", ALICE)
     before = await pool.fetchval(
         "select count(*) from public.audit_events where action = 'note.update'"
     )
@@ -362,9 +355,7 @@ async def test_audit_record_succeeds_for_a_member(pool):
         await tx.start()
         await conn.execute("set local role authenticated")
         await conn.execute("select set_config('request.jwt.claim.sub', $1, true)", ALICE)
-        await conn.execute(
-            "select set_config('request.jwt.claim.role', 'authenticated', true)"
-        )
+        await conn.execute("select set_config('request.jwt.claim.role', 'authenticated', true)")
         await audit.record(conn, workspace_id=str(ws), action="note.update", target_type="note")
         await tx.commit()
 

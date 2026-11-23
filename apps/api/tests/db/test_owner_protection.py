@@ -65,9 +65,7 @@ async def fixture(pool):
     Rows are restored on teardown, because these tests write membership rows and
     a leaked `admin` would make a later test fail for the wrong reason.
     """
-    ws = await pool.fetchval(
-        "select id from public.workspaces where owner_id = $1 limit 1", ALICE
-    )
+    ws = await pool.fetchval("select id from public.workspaces where owner_id = $1 limit 1", ALICE)
     assert ws is not None, "seed data missing: Alice has no workspace"
 
     async with pool.acquire() as conn:
@@ -82,9 +80,7 @@ async def fixture(pool):
             CAROL,
         )
         # Reset the owner in case an earlier run left it moved.
-        await conn.execute(
-            "update public.workspaces set owner_id = $1 where id = $2", ALICE, ws
-        )
+        await conn.execute("update public.workspaces set owner_id = $1 where id = $2", ALICE, ws)
         await conn.execute(
             "update public.workspace_members set role = 'owner' "
             "where workspace_id = $1 and user_id = $2",
@@ -113,9 +109,7 @@ async def fixture(pool):
             ws,
             CAROL,
         )
-        await conn.execute(
-            "update public.workspaces set owner_id = $1 where id = $2", ALICE, ws
-        )
+        await conn.execute("update public.workspaces set owner_id = $1 where id = $2", ALICE, ws)
 
 
 async def _as(conn: asyncpg.Connection, user_id: str) -> None:
@@ -128,12 +122,8 @@ async def _as(conn: asyncpg.Connection, user_id: str) -> None:
     automatically and keeps the pool clean.
     """
     await conn.execute("set local role authenticated")
-    await conn.execute(
-        "select set_config('request.jwt.claim.sub', $1, true)", user_id
-    )
-    await conn.execute(
-        "select set_config('request.jwt.claim.role', 'authenticated', true)"
-    )
+    await conn.execute("select set_config('request.jwt.claim.sub', $1, true)", user_id)
+    await conn.execute("select set_config('request.jwt.claim.role', 'authenticated', true)")
 
 
 async def _attempt(pool: asyncpg.Pool, user_id: str, sql: str, *args) -> int:
@@ -216,9 +206,7 @@ async def test_admin_cannot_rewrite_owner_id(fixture, pool):
     )
     assert changed == 0, "an admin rewrote workspaces.owner_id"
 
-    owner = await pool.fetchval(
-        "select owner_id from public.workspaces where id = $1", ws
-    )
+    owner = await pool.fetchval("select owner_id from public.workspaces where id = $1", ws)
     assert str(owner) == ALICE
 
 
@@ -335,9 +323,7 @@ async def test_the_three_statement_takeover_chain_fails(fixture, pool):
             )
 
     # Whatever path was taken, the world is unchanged.
-    owner = await pool.fetchval(
-        "select owner_id from public.workspaces where id = $1", ws
-    )
+    owner = await pool.fetchval("select owner_id from public.workspaces where id = $1", ws)
     assert str(owner) == ALICE, "workspaces.owner_id was moved"
     roles = dict(
         await pool.fetch(
@@ -365,9 +351,7 @@ async def test_owner_cannot_be_demoted_once_more_via_a_different_column(fixture,
     )
     assert changed == 0
 
-    owner = await pool.fetchval(
-        "select owner_id from public.workspaces where id = $1", ws
-    )
+    owner = await pool.fetchval("select owner_id from public.workspaces where id = $1", ws)
     assert str(owner) == ALICE
 
 
