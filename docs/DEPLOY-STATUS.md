@@ -24,8 +24,8 @@ records *what happened* when we did.
 
 Production URL: **https://nexus-final-thesis.vercel.app**
 
-Deployment `dpl_EXjemDv9LBA4rPEgaQu3x6cJjEW3`, built from `a8787f4` on
-`arena/0c074137-aipersonalbrainproject`. Vercel reports `ready_state: READY`,
+Deployment `dpl_Hw4WjMfH5JHAB6LAVMaHNDDSGPuz`, built from merge commit
+`c48b45b` on `main`. Vercel reports `ready_state: READY`,
 `readySubstate: PROMOTED`, and `aliasAssigned: true` for the production alias.
 
 ## 2. Database
@@ -127,6 +127,40 @@ So a push to `main` *does* publish to `https://nexus-final-thesis.vercel.app`.
 The confusion came from the project's `link.gitProviderOptions.createDeployments`
 reading `disabled` at creation time; what actually governs this is the
 GitHub-App integration, which is active.
+
+### Errors on the first screen blamed the wrong layer (fixed)
+
+Signing in and opening any workspace page produced, in place of the page,
+`No workspace is selected.` — and on the documents page the browser rendered a
+dropped file as `midterm module.pdf No workspace is selected.`, a filename glued
+to a cause that had nothing to do with it.
+
+Two distinct defects, one cause. `wsPath()` throws while no workspace is active,
+and it is called from **32 places across 8 pages**. Every workspace page renders
+*before* the workspace list resolves, so its first fetch throws — the page is
+reporting a transient condition as an error. And when the list genuinely failed
+(no reachable API, so the proxy answers `502 api_unreachable`), that per-page
+message was the *only* thing shown, once per page: it named the workspace
+selector while the API was the thing missing.
+
+The first repair (PR #27) gated the dashboard alone, which was the wrong
+altitude — it fixed one of eight pages. The gate now lives in
+`apps/web/src/routes/(workspace)/+layout.svelte`, the single component all eight
+pages pass through:
+
+| State | What renders |
+|---|---|
+| workspace list failed | the real error, **once**, with its code (`api_unreachable`) |
+| loaded, but no workspace | `no_workspace`, with an actionable message |
+| still resolving | `Opening your workspace…` — quiet, not an error that flashes |
+| active workspace | the page |
+
+`FileUploader.svelte` also refuses a drop with an accurate message. A drop zone
+that silently accepts a file it cannot send is worse than one that says why.
+
+This changes the *reporting*, not the *cause*: the app still cannot work,
+because the API is still not deployed. The failure is now legible and correctly
+attributed — one message naming the layer that is down.
 
 ## 4. What is deliberately not done
 
