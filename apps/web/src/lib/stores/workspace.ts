@@ -20,6 +20,18 @@ export const workspaces = writable<Workspace[]>([]);
 export const activeWorkspaceId = writable<string | null>(null);
 export const workspacesLoading = writable(true);
 
+/**
+ * Why the workspace list could not be loaded, or null.
+ *
+ * This exists because the previous behaviour swallowed the error into an empty
+ * list, and an empty list is indistinguishable from "this account has no
+ * workspace yet". Pages that open with `if (!$activeWorkspaceId) return` then
+ * never clear their loading flag, so the user gets a spinner that never stops
+ * and no explanation — which is exactly what a deployed build with no reachable
+ * API produced. The failure has to be visible somewhere the UI can read it.
+ */
+export const workspacesError = writable<{ message: string; code?: string } | null>(null);
+
 export const activeWorkspace = derived(
   [workspaces, activeWorkspaceId],
   ([$workspaces, $id]) => $workspaces.find((w) => w.id === $id) ?? null
@@ -44,6 +56,7 @@ function choose(list: Workspace[], preferred: string | null): string | null {
 
 export async function loadWorkspaces(): Promise<void> {
   workspacesLoading.set(true);
+  workspacesError.set(null);
   try {
     const list = await apiFetch<Workspace[]>('/workspaces');
     workspaces.set(list);
@@ -51,10 +64,12 @@ export async function loadWorkspaces(): Promise<void> {
     activeWorkspaceId.set(next);
     remember(next);
   } catch (err) {
-    // A failed workspace load is not fatal to the shell — pages will surface
-    // their own errors — but it must not leave the selector spinning forever.
+    // A failed workspace load is not fatal to the shell, but it must leave a
+    // trace. Previously it did not, and the result was an unkillable spinner.
     if (!(err instanceof NexusApiError)) throw err;
     workspaces.set([]);
+    activeWorkspaceId.set(null);
+    workspacesError.set({ message: err.message, code: err.code });
   } finally {
     workspacesLoading.set(false);
   }

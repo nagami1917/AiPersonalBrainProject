@@ -8,7 +8,13 @@
    */
   import { onMount } from 'svelte';
   import { apiFetch, NexusApiError } from '$lib/api/client';
-  import { wsPath, activeWorkspace, activeWorkspaceId } from '$lib/stores/workspace';
+  import {
+    wsPath,
+    activeWorkspace,
+    activeWorkspaceId,
+    workspacesLoading,
+    workspacesError
+  } from '$lib/stores/workspace';
   import { canWrite } from '$lib/api/types';
   import type {
     DocumentSummary,
@@ -34,7 +40,16 @@
   const empty = $derived(!loading && stats !== null && stats.notes === 0 && stats.documents === 0);
 
   async function load() {
-    if (!$activeWorkspaceId) return;
+    // No workspace id yet is not a dead end on its own: the id arrives
+    // asynchronously from `loadWorkspaces()`. Returning early here without
+    // clearing `loading` is what left the page spinning forever when the
+    // workspace fetch failed, so the failure case is handled in the template
+    // against `$workspacesError` instead of being indistinguishable from
+    // "still starting up".
+    if (!$activeWorkspaceId) {
+      loading = false;
+      return;
+    }
     loading = true;
     error = null;
     try {
@@ -72,6 +87,23 @@
 
   {#if error}
     <ErrorNotice message={error.message} code={error.code} />
+  {/if}
+
+  {#if $workspacesError}
+    <!--
+      The workspace list is the first thing every page needs. If it cannot be
+      fetched nothing else on this page can work, so the cause is shown here
+      rather than five panels each failing separately.
+    -->
+    <ErrorNotice
+      message={$workspacesError.message}
+      code={$workspacesError.code ?? 'workspaces_unavailable'}
+    />
+  {:else if !$workspacesLoading && !$activeWorkspaceId}
+    <ErrorNotice
+      message="Your account has no workspace yet. Reload the page, or sign in again to finish setup."
+      code="no_workspace"
+    />
   {/if}
 
   {#if !empty}
