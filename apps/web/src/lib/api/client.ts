@@ -10,6 +10,26 @@
  */
 import { env } from '$lib/utils/env';
 import { getSupabase } from '$lib/api/supabase';
+import { API_PREFIX, joinOrigin } from '$lib/api/paths';
+
+/**
+ * Resolve an API path to a URL the browser can fetch.
+ *
+ * Two shapes, both supported:
+ *
+ *   absolute   `PUBLIC_API_BASE_URL=https://api.example.com` → joined directly.
+ *              FastAPI must then allow the origin via CORS_ALLOWED_ORIGINS.
+ *   relative   no base configured → `${API_PREFIX}${path}`, i.e.
+ *              `/api/v1/...` on this origin, proxied to FastAPI in dev and
+ *              same-origin in production. No CORS, no reachable localhost.
+ *
+ * Accepting both means the deployment shape is a configuration decision rather
+ * than a code change, and the second is the default because it is the one that
+ * cannot be misconfigured into browsing `127.0.0.1` from a user's machine.
+ */
+function apiUrl(path: string): string {
+  return env.apiBaseUrl ? joinOrigin(env.apiBaseUrl, path) : `${API_PREFIX}${path}`;
+}
 
 export class NexusApiError extends Error {
   code: string;
@@ -42,7 +62,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const response = await fetch(`${env.apiBaseUrl}${path}`, {
+  const response = await fetch(apiUrl(path), {
     method: options.method ?? 'GET',
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -108,7 +128,7 @@ export async function streamChat(
   signal?: AbortSignal
 ): Promise<void> {
   const token = await accessToken();
-  const response = await fetch(`${env.apiBaseUrl}/v1/workspaces/${workspaceId}/chat/stream`, {
+  const response = await fetch(apiUrl(`/v1/workspaces/${workspaceId}/chat/stream`), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

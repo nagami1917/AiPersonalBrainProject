@@ -74,8 +74,8 @@ scripts/                   dev helpers
 ## Quick start
 
 ```bash
-cp .env.example .env      # fill in Supabase keys after `supabase start`
-make install              # backend venv + npm install
+make install              # deps + apps/api/.env and apps/web/.env.local from
+                          # their templates (fill in Supabase keys after `supabase start`)
 supabase start            # local Postgres / Auth / Storage
 make db-reset             # migrations + seed
 make dev                  # API :8000, web :5173
@@ -135,5 +135,6 @@ Sign in as `alice@nexus.local` / `password123` and ask *"Where do my deployment 
 | [RAG-PIPELINE.md](docs/RAG-PIPELINE.md) | Chunking, hybrid retrieval, the grounding contract, evaluation |
 | [API.md](docs/API.md) | Endpoints, payloads, errors, contract tests |
 | [SECURITY.md](docs/SECURITY.md) | Threat model, keys, isolation proof, prompt injection |
-| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Supabase + Fly.io + Vercel setup, CI, config reference |
+| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local setup, CI, config reference |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Vercel + Fly.io + Supabase, environment files, pre-deploy checks |
 | [ROADMAP.md](docs/ROADMAP.md) | Milestones M0–M6, deferred decisions |

@@ -16,7 +16,14 @@ help: ## show this help
 # --- setup -------------------------------------------------------------------
 .PHONY: install
 install: install-api install-web ## install backend + frontend deps
-	@test -f .env || (cp .env.example .env && echo "created .env from .env.example — fill in secrets")
+	@test -f $(API)/.env || (cp $(API)/.env.example $(API)/.env \
+	  && echo "created apps/api/.env — fill in the Supabase + AI values")
+	@test -f $(WEB)/.env.local || (cp $(WEB)/.env.example $(WEB)/.env.local \
+	  && echo "created apps/web/.env.local — fill in the anon key")
+	@echo ""
+	@echo "Two files, deliberately: the backend file holds secrets, the frontend"
+	@echo "file holds only PUBLIC_* values that ship in the bundle."
+	@echo "Neither is committed (see .gitignore)."
 
 .PHONY: install-api
 install-api: ## create venv and install backend deps
@@ -108,6 +115,10 @@ migrate-remote: ## push migrations to the linked Supabase project
 .PHONY: deploy-api
 deploy-api: ## deploy web + worker to Fly
 	fly deploy
+
+.PHONY: deploy-check
+deploy-check: ## verify required production env vars are present (no values printed)
+	@./scripts/check-env.sh
 
 .PHONY: logs
 logs: ## tail Fly logs

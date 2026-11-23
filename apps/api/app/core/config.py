@@ -13,10 +13,32 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "test", "preview", "production"]
+
+# Known model → dimension. Pinned here because these two values are a pair: a
+# vector column built for one is unusable with the other.
+_EMBEDDING_DIMS = {"text-embedding-3-small": 1536, "text-embedding-3-large": 3072}
+
+# The documented local default. Named so the alias resolver can tell "the
+# operator set this" from "this is the fallback" — a field with a non-empty
+# default cannot be tested for presence by truthiness alone.
+_DEFAULT_CORS = "http://localhost:5173"
+
+
+def _assert_dim_matches(model: str, dim: int) -> int:
+    """Return `dim` if it is consistent with `model`, else raise.
+
+    Called from the field validator *and* from the alias resolver: a setting can
+    arrive under either spelling, and checking only one path is how
+    `EMBEDDING_MODEL=text-embedding-3-large` would slip through with dim=1536.
+    """
+    expected = _EMBEDDING_DIMS.get(model)
+    if expected is not None and dim != expected:
+        raise ValueError(f"{model} produces {expected}-dim vectors but PINNED_EMBEDDING_DIM={dim}")
+    return dim
 
 
 class Settings(BaseSettings):
@@ -37,11 +59,20 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     supabase_service_role_key: str
     supabase_jwt_secret: str
-    database_url: str
+    database_url: str = ""
+    # The spec's name for the same connection. Resolved into `database_url` by
+    # the validator below, so no other module needs to know both exist.
+    supabase_db_url: str = ""
 
     # --- ai providers -------------------------------------------------------
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
+    # Spec names. `AI_API_KEY` / `AI_MODEL` / `EMBEDDING_MODEL` are folded into
+    # the canonical fields by `_resolve_spec_aliases`; they exist so a value
+    # pasted from the deployment document works instead of failing at boot.
+    ai_api_key: str = ""
+    ai_model: str = ""
+    embedding_model: str = ""
 
     # Pinned model identity. Changing either value is a migration, not a tweak.
     pinned_embedding_model: str = "text-embedding-3-small"
@@ -71,7 +102,10 @@ class Settings(BaseSettings):
     max_context_tokens: int = 6000
 
     # --- limits / behaviour --------------------------------------------------
-    max_upload_bytes: int = 50 * 1024 * 1024
+    max_upload_bytes: int = 0  # resolved from MAX_UPLOAD_SIZE_MB below if unset
+    # The spec names the limit in megabytes. Bytes remain the canonical unit
+    # because that is what Storage and the schemas use; this is the input form.
+    max_upload_size_mb: int = 25
     # Design §4.1: PDF, DOCX, TXT, Markdown, HTML. `application/msword` is not
     # listed there — python-docx reads .docx only, so accepting .doc would fail
     # at extraction time with a confusing error instead of at upload time.
@@ -84,7 +118,9 @@ class Settings(BaseSettings):
         "text/html",
         "application/xhtml+xml",
     )
-    cors_allowed_origins: str = "http://localhost:5173"
+    cors_allowed_origins: str = _DEFAULT_CORS
+    # Spec name for the same list.
+    allowed_origins: str = ""
     worker_concurrency: int = 2
     worker_poll_interval_seconds: float = 2.0
     job_stale_after_seconds: int = 900
@@ -109,17 +145,69 @@ class Settings(BaseSettings):
     # document we cannot classify — which is the point of checking.
     sniff_bytes: int = 4096
 
-    @field_validator("pinned_embedding_dim")
-    @classmethod
-    def _dim_must_match_pinned_model(cls, v: int, info) -> int:  # type: ignore[no-untyped-def]
-        model = info.data.get("pinned_embedding_model")
-        known = {"text-embedding-3-small": 1536, "text-embedding-3-large": 3072}
-        expected = known.get(model or "")
-        if expected is not None and v != expected:
+    @model_validator(mode="after")
+    def _resolve_spec_aliases(self) -> Settings:
+        """Fold the spec's variable names into the canonical fields.
+
+        The deployment document and this codebase grew different names for the
+        same settings (`SUPABASE_DB_URL` vs `DATABASE_URL`, `AI_API_KEY` vs
+        `OPENAI_API_KEY`, `ALLOWED_ORIGINS` vs `CORS_ALLOWED_ORIGINS`,
+        `MAX_UPLOAD_SIZE_MB` vs `MAX_UPLOAD_BYTES`).
+
+        Accepting both is not laziness: a renamed variable in a Fly secret or a
+        Vercel project fails at boot with "missing required value", which reads
+        as a broken deployment rather than a spelling mismatch. The canonical
+        name always wins when both are set, so behaviour never depends on which
+        one happens to be present.
+
+        Each alias is stated in the comment where it is resolved, and listed in
+        DEPLOYMENT.md §5, so the accepted set is discoverable rather than
+        folklore.
+        """
+        # SUPABASE_DB_URL → DATABASE_URL
+        if not self.database_url and self.supabase_db_url:
+            self.database_url = self.supabase_db_url
+        if not self.database_url:
             raise ValueError(
-                f"{model} produces {expected}-dim vectors but PINNED_EMBEDDING_DIM={v}"
+                "DATABASE_URL (or SUPABASE_DB_URL) is required — the API cannot "
+                "reach Postgres without it"
             )
-        return v
+
+        # AI_API_KEY → OPENAI_API_KEY
+        if not self.openai_api_key and self.ai_api_key:
+            self.openai_api_key = self.ai_api_key
+        if not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY (or AI_API_KEY) is required")
+        # AI_MODEL → LLM_MODEL, EMBEDDING_MODEL → PINNED_EMBEDDING_MODEL
+        if self.ai_model:
+            self.llm_model = self.ai_model
+        if self.embedding_model:
+            self.pinned_embedding_model = self.embedding_model
+
+        # ALLOWED_ORIGINS → CORS_ALLOWED_ORIGINS
+        #
+        # Guarded by "is the canonical value still the default?", because the
+        # field has a non-empty default: `if self.allowed_origins` alone would
+        # let the alias silently override an explicitly configured
+        # CORS_ALLOWED_ORIGINS. Every other alias folds into a field that
+        # defaults to empty or zero, where a bare truthiness test is enough.
+        if self.allowed_origins and self.cors_allowed_origins == _DEFAULT_CORS:
+            self.cors_allowed_origins = self.allowed_origins
+
+        # MAX_UPLOAD_SIZE_MB → MAX_UPLOAD_BYTES (bytes win when both are set)
+        if not self.max_upload_bytes:
+            self.max_upload_bytes = self.max_upload_size_mb * 1024 * 1024
+
+        # The embedding model and its dimension are a pair: a vector column built
+        # for one is unusable with the other. Checked here, once, after every
+        # spelling has been folded in — a field-level validator would compare
+        # against whichever model was the default rather than the configured one,
+        # and would reject the valid `EMBEDDING_MODEL=…-large` + dim=3072 pair.
+        self.pinned_embedding_dim = _assert_dim_matches(
+            self.pinned_embedding_model, self.pinned_embedding_dim
+        )
+
+        return self
 
     @property
     def cors_origins(self) -> list[str]:
