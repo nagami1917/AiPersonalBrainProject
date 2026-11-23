@@ -111,6 +111,15 @@ as $$
   select coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), 'anon');
 $$;
 
+-- RLS policies call `auth.uid()` from inside a query run as `authenticated`, so
+-- the role needs USAGE on the schema and EXECUTE on the function. Supabase
+-- grants both; without them every insert policy that references auth.uid()
+-- fails with "permission denied for schema auth", which looks like an RLS bug
+-- and is really a missing grant. Creating the function does not grant it.
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant execute on function auth.role() to anon, authenticated, service_role;
+
 -- --- storage schema ---------------------------------------------------------
 create schema if not exists storage;
 

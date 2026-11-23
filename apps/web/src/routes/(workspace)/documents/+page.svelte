@@ -26,7 +26,7 @@
     try {
       const [docs, metaResponse] = await Promise.all([
         apiFetch<{ items: DocumentSummary[] }>(wsPath('/documents')),
-        apiFetch<Meta>('/v1/meta')
+        apiFetch<Meta>('/meta')
       ]);
       documents = docs.items;
       meta = metaResponse;

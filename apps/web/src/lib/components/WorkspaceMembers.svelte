@@ -40,7 +40,7 @@
     loading = true;
     try {
       members = await apiFetch<WorkspaceMember[]>(
-        `/v1/workspaces/${$activeWorkspaceId}/members`
+        `/workspaces/${$activeWorkspaceId}/members`
       );
     } catch (err) {
       error =
@@ -65,7 +65,7 @@
     error = null;
     notice = null;
     try {
-      await apiFetch(`/v1/workspaces/${$activeWorkspaceId}/members`, {
+      await apiFetch(`/workspaces/${$activeWorkspaceId}/members`, {
         method: 'POST',
         body: { email: email.trim(), role }
       });
@@ -87,7 +87,7 @@
     if (!$activeWorkspaceId) return;
     error = null;
     try {
-      await apiFetch(`/v1/workspaces/${$activeWorkspaceId}/members/${userId}`, {
+      await apiFetch(`/workspaces/${$activeWorkspaceId}/members/${userId}`, {
         method: 'PATCH',
         body: { role: next }
       });
@@ -104,7 +104,7 @@
     if (!$activeWorkspaceId) return;
     error = null;
     try {
-      await apiFetch(`/v1/workspaces/${$activeWorkspaceId}/members/${userId}`, {
+      await apiFetch(`/workspaces/${$activeWorkspaceId}/members/${userId}`, {
         method: 'DELETE'
       });
       await load();

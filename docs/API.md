@@ -9,9 +9,9 @@ Base URL: `https://api.nexus.app` (Fly.io) · all paths under `/v1`
 
 | Aspect | Rule |
 |---|---|
-| Auth | `Authorization: Bearer <supabase_access_token>` on every route except `/health` and `/v1/meta` |
+| Auth | `Authorization: Bearer <supabase_access_token>` on every route except `/health` and `/api/v1/meta` |
 | User identity | Derived **only** from the verified JWT (`sub` claim). Any `user_id` in a request body is ignored, not trusted |
-| Workspace scope | Every tenant route is `/v1/workspaces/{workspace_id}/…`. Membership is resolved server-side; **not a member → `404`**, never `403` |
+| Workspace scope | Every tenant route is `/api/v1/workspaces/{workspace_id}/…`. Membership is resolved server-side; **not a member → `404`**, never `403` |
 | Content type | `application/json` unless noted (`multipart` is avoided — uploads go direct to Storage) |
 | IDs | UUID strings |
 | Timestamps | RFC 3339 UTC (`2026-11-22T12:30:00Z`) |
@@ -54,7 +54,7 @@ Supabase Auth owns signup, login, OAuth, password reset, and token refresh. **Fa
 
 - Frontend obtains a session from Supabase; the access token is attached to every API call.
 - FastAPI verifies the JWT signature (JWKS, cached; key rotation handled), validates `aud`/`iss`/`exp`, then sets the request's user context.
-- `GET /v1/auth/me` is the cold-start call: it validates the token implicitly (it would not
+- `GET /api/v1/auth/me` is the cold-start call: it validates the token implicitly (it would not
   authorise without one) and returns the profile, the caller's workspaces, and
   `default_workspace_id` in one response. The frontend needs all three before it can render
   anything, and making it infer a default from the workspace list is how a user lands in the
@@ -73,7 +73,7 @@ Supabase Auth owns signup, login, OAuth, password reset, and token refresh. **Fa
 ## 2a. Two path shapes, one implementation
 
 The spec lists resources flat (`GET /notes`, `POST /ai/chat`, `GET /graph`). This API nests
-them (`GET /v1/workspaces/{id}/notes`) because a workspace in the path is how authorisation,
+them (`GET /api/v1/workspaces/{id}/notes`) because a workspace in the path is how authorisation,
 the RLS identity, and every other resource route work — and because a workspace that silently
 falls back to "some workspace" is a tenancy hazard.
 
@@ -81,8 +81,8 @@ Both shapes are served, from one implementation each:
 
 | Shape | Path | Workspace comes from |
 |---|---|---|
-| Scoped (canonical) | `/v1/workspaces/{id}/notes` | the path, always explicit |
-| Flat (spec) | `/v1/notes?workspace_id=…` | the query parameter, or `profiles.default_workspace_id` |
+| Scoped (canonical) | `/api/v1/workspaces/{id}/notes` | the path, always explicit |
+| Flat (spec) | `/api/v1/notes?workspace_id=…` | the query parameter, or `profiles.default_workspace_id` |
 
 The flat forms delegate to the scoped view functions, so a tenancy or `status` fix cannot be
 made in one copy and forgotten in the other. An explicit `workspace_id` is authorised exactly
@@ -103,7 +103,7 @@ for a write that creates storage objects is not a convenience worth having.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness. No auth. Returns `{status, version, commit}` |
-| `GET` | `/v1/meta` | Public capability document: supported file types, size limits, embedding model id, feature flags. The frontend uses this to avoid hardcoding limits |
+| `GET` | `/api/v1/meta` | Public capability document: supported file types, size limits, embedding model id, feature flags. The frontend uses this to avoid hardcoding limits |
 
 ---
 
@@ -114,21 +114,21 @@ authorised the same way.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/v1/auth/me` | Identity + workspaces + default workspace |
-| `GET` | `/v1/notes` | List notes |
-| `POST` | `/v1/notes` | Create note (`202`; chunking is asynchronous) |
-| `GET` | `/v1/documents` | List documents |
-| `GET` | `/v1/documents/{id}` | Document details |
-| `DELETE` | `/v1/documents/{id}` | Delete document |
-| `POST` | `/v1/documents/{id}/reprocess` | Reprocess (`202`) |
-| `GET` | `/v1/collections` | List collections |
-| `POST` | `/v1/collections` | Create collection |
-| `GET` | `/v1/conversations` | Chat history |
-| `GET` | `/v1/conversations/{id}` | Conversation with messages and citations |
-| `GET` | `/v1/search?q=` | Search (`mode`, `limit`, `kind`, `collection_id`) |
-| `GET` | `/v1/graph` | Nodes and edges in one snapshot |
+| `GET` | `/api/v1/auth/me` | Identity + workspaces + default workspace |
+| `GET` | `/api/v1/notes` | List notes |
+| `POST` | `/api/v1/notes` | Create note (`202`; chunking is asynchronous) |
+| `GET` | `/api/v1/documents` | List documents |
+| `GET` | `/api/v1/documents/{id}` | Document details |
+| `DELETE` | `/api/v1/documents/{id}` | Delete document |
+| `POST` | `/api/v1/documents/{id}/reprocess` | Reprocess (`202`) |
+| `GET` | `/api/v1/collections` | List collections |
+| `POST` | `/api/v1/collections` | Create collection |
+| `GET` | `/api/v1/conversations` | Chat history |
+| `GET` | `/api/v1/conversations/{id}` | Conversation with messages and citations |
+| `GET` | `/api/v1/search?q=` | Search (`mode`, `limit`, `kind`, `collection_id`) |
+| `GET` | `/api/v1/graph` | Nodes and edges in one snapshot |
 
-`GET /v1/graph` returns `{nodes, edges, workspace_id}` from a single pair of queries, so a graph
+`GET /api/v1/graph` returns `{nodes, edges, workspace_id}` from a single pair of queries, so a graph
 view cannot render an edge whose node is missing because a second request had not arrived yet.
 
 ---
@@ -139,11 +139,11 @@ The tenant root. A user always has at least one — the personal workspace creat
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/v1/workspaces` | Workspaces the caller belongs to, with their role and member count |
-| `POST` | `/v1/workspaces` | `{name}` → creates a non-personal workspace; caller becomes owner (`201`) |
-| `GET` | `/v1/workspaces/{id}` | One workspace the caller belongs to |
-| `PATCH` | `/v1/workspaces/{id}` | Rename — `admin` or above |
-| `DELETE` | `/v1/workspaces/{id}` | Owner only; `422 personal_workspace` for the personal one |
+| `GET` | `/api/v1/workspaces` | Workspaces the caller belongs to, with their role and member count |
+| `POST` | `/api/v1/workspaces` | `{name}` → creates a non-personal workspace; caller becomes owner (`201`) |
+| `GET` | `/api/v1/workspaces/{id}` | One workspace the caller belongs to |
+| `PATCH` | `/api/v1/workspaces/{id}` | Rename — `admin` or above |
+| `DELETE` | `/api/v1/workspaces/{id}` | Owner only; `422 personal_workspace` for the personal one |
 | `GET` | `…/members` | Member roster with roles |
 | `POST` | `…/members` | `{email, role}` — adds an **existing** account; `404 user_not_found` otherwise |
 | `PATCH` | `…/members/{user_id}` | Change role; the owner's role cannot be changed |
@@ -158,7 +158,7 @@ address rather than promising a delivery flow that does not exist.
 
 ### 3.3 Documents
 
-All document routes are scoped: `/v1/workspaces/{workspace_id}/documents…`.
+All document routes are scoped: `/api/v1/workspaces/{workspace_id}/documents…`.
 
 #### `POST …/documents/upload-url`
 Request a signed upload target. The API validates type/size and reserves the path; bytes never transit FastAPI.
@@ -296,13 +296,13 @@ indexes exist (migration `0010`) but no route consumes them.
 
 ---
 
-### 3.6a AI (`/v1/ai`)
+### 3.6a AI (`/api/v1/ai`)
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/ai/chat` | Ask NEXUS; workspace in the body |
-| `POST` | `/v1/ai/stream` | Same, streamed as SSE |
-| `POST` | `/v1/ai/summarize` | Summarize pasted text or one source |
+| `POST` | `/api/v1/ai/chat` | Ask NEXUS; workspace in the body |
+| `POST` | `/api/v1/ai/stream` | Same, streamed as SSE |
+| `POST` | `/api/v1/ai/summarize` | Summarize pasted text or one source |
 
 `/ai/chat` accepts `question` as an alias for `message` (the spec's example uses `question`;
 the canonical route and the frontend use `message`). Exactly one must be present.
@@ -470,7 +470,7 @@ summarise have *separate* pools, so alternating endpoints cannot multiply an all
 ```
 
 `details.scope` distinguishes your own traffic from a busy workspace. Limits are per process, and
-`GET /v1/meta` reports them under `rate_limits` with `distributed: false` rather than implying a
+`GET /api/v1/meta` reports them under `rate_limits` with `distributed: false` rather than implying a
 precision the implementation does not have. Auth endpoints are Supabase's responsibility.
 
 ---
@@ -478,7 +478,7 @@ precision the implementation does not have. Auth endpoints are Supabase's respon
 ## 4.1 Document download
 
 ```
-GET /v1/workspaces/{workspace_id}/documents/{document_id}/download-url
+GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/download-url
 → 200 { url, expires_at, filename, mime_type }
 ```
 
@@ -492,7 +492,7 @@ and it is exactly the value a path-manipulation attempt wants.
 ## 4.2 Audit trail
 
 ```
-GET /v1/workspaces/{workspace_id}/audit?limit=50&before=<iso>&action=<prefix>&target_id=<uuid>
+GET /api/v1/workspaces/{workspace_id}/audit?limit=50&before=<iso>&action=<prefix>&target_id=<uuid>
 → { items: [{ id, action, target_type, target_id, target_label, detail,
               actor_id, actor_name, request_id, created_at }],
     next_cursor }

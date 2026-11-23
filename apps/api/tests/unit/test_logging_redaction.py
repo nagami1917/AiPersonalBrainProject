@@ -115,7 +115,7 @@ class TestFormatter:
         assert "document" not in payload
 
     def test_standard_fields_are_present(self):
-        payload = self._format("ok", status=200, path="/v1/x")
+        payload = self._format("ok", status=200, path="/api/v1/x")
         assert payload["msg"] == "ok"
         assert payload["status"] == 200
         assert payload["level"] == "INFO"

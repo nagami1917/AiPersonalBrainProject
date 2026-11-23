@@ -51,8 +51,8 @@ This milestone is deliberately before any UI. The tenant boundary is the one thi
 
 **Done when:** asking a question returns an answer whose every citation points at a real chunk, and an unanswerable question is refused rather than answered.
 
-- `/v1/search` (hybrid, RRF, `matched_arm`)
-- `/v1/workspaces/{id}/chat` + `/chat/stream`: retrieval → assembly → generation → citation resolution → persistence
+- `/api/v1/search` (hybrid, RRF, `matched_arm`)
+- `/api/v1/workspaces/{id}/chat` + `/chat/stream`: retrieval → assembly → generation → citation resolution → persistence
 - Score floor / ungrounded path; fabricated-marker stripping
 - Eval harness with answerable / unanswerable / adversarial sets, run in CI
 - Tests: no-LLM-call assertion on the refusal path; cross-tenant retrieval isolation

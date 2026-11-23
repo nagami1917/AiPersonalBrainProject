@@ -111,8 +111,8 @@ class TestStats:
         alice = await _workspace_of(ALICE)
         bob = await _workspace_of(BOB)
 
-        a = (await client.get(f"/v1/workspaces/{alice}/stats", headers=_auth(ALICE))).json()
-        b = (await client.get(f"/v1/workspaces/{bob}/stats", headers=_auth(BOB))).json()
+        a = (await client.get(f"/api/v1/workspaces/{alice}/stats", headers=_auth(ALICE))).json()
+        b = (await client.get(f"/api/v1/workspaces/{bob}/stats", headers=_auth(BOB))).json()
 
         assert a["workspace_id"] == alice
         assert b["workspace_id"] == bob
@@ -122,21 +122,21 @@ class TestStats:
 
     async def test_a_foreign_workspace_is_404(self, client):
         alice = await _workspace_of(ALICE)
-        response = await client.get(f"/v1/workspaces/{alice}/stats", headers=_auth(BOB))
+        response = await client.get(f"/api/v1/workspaces/{alice}/stats", headers=_auth(BOB))
         assert response.status_code == 404
 
     async def test_counts_move_when_a_note_is_added(self, client):
         workspace = await _workspace_of(ALICE)
-        before = (await client.get(f"/v1/workspaces/{workspace}/stats", headers=_auth())).json()
+        before = (await client.get(f"/api/v1/workspaces/{workspace}/stats", headers=_auth())).json()
 
         created = await client.post(
-            f"/v1/workspaces/{workspace}/notes",
+            f"/api/v1/workspaces/{workspace}/notes",
             headers=_auth(),
             json={"title": "Stats probe note", "content": "A note, to move a counter."},
         )
         assert created.status_code in (201, 202), created.text
 
-        after = (await client.get(f"/v1/workspaces/{workspace}/stats", headers=_auth())).json()
+        after = (await client.get(f"/api/v1/workspaces/{workspace}/stats", headers=_auth())).json()
         assert after["notes"] == before["notes"] + 1
 
 
@@ -152,7 +152,7 @@ class TestBacklinks:
 
         first = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": _unique("Link source"), "content": f"Points at [[{target_title}]]."},
             )
@@ -160,7 +160,7 @@ class TestBacklinks:
 
         # Before the target exists, the link is visible but unresolved.
         detail = (
-            await client.get(f"/v1/workspaces/{workspace}/notes/{first['id']}", headers=_auth())
+            await client.get(f"/api/v1/workspaces/{workspace}/notes/{first['id']}", headers=_auth())
         ).json()
         outgoing = detail["outgoing_links"]
         assert [o["target_title"] for o in outgoing] == [target_title]
@@ -169,7 +169,7 @@ class TestBacklinks:
 
         second = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": target_title, "content": "Now it exists."},
             )
@@ -177,12 +177,14 @@ class TestBacklinks:
 
         # The target now sees the backlink, and the source's link resolved.
         target = (
-            await client.get(f"/v1/workspaces/{workspace}/notes/{second['id']}", headers=_auth())
+            await client.get(
+                f"/api/v1/workspaces/{workspace}/notes/{second['id']}", headers=_auth()
+            )
         ).json()
         assert [b["id"] for b in target["backlinks"]] == [first["id"]]
 
         source = (
-            await client.get(f"/v1/workspaces/{workspace}/notes/{first['id']}", headers=_auth())
+            await client.get(f"/api/v1/workspaces/{workspace}/notes/{first['id']}", headers=_auth())
         ).json()
         assert source["outgoing_links"][0]["resolved"] is True
         assert source["outgoing_links"][0]["target_id"] == second["id"]
@@ -191,20 +193,20 @@ class TestBacklinks:
         workspace = await _workspace_of(ALICE)
         note = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": _unique("Rewrites links"), "content": "Old [[gone]]"},
             )
         ).json()["note"]
 
         await client.patch(
-            f"/v1/workspaces/{workspace}/notes/{note['id']}",
+            f"/api/v1/workspaces/{workspace}/notes/{note['id']}",
             headers=_auth(),
             json={"content": "New [[kept]]"},
         )
 
         detail = (
-            await client.get(f"/v1/workspaces/{workspace}/notes/{note['id']}", headers=_auth())
+            await client.get(f"/api/v1/workspaces/{workspace}/notes/{note['id']}", headers=_auth())
         ).json()
         titles = {o["target_title"].lower() for o in detail["outgoing_links"]}
         assert titles == {"kept"}, "a removed link must not linger"
@@ -217,7 +219,7 @@ class TestBacklinks:
 
         bob_note = (
             await client.post(
-                f"/v1/workspaces/{bob}/notes",
+                f"/api/v1/workspaces/{bob}/notes",
                 headers=_auth(BOB),
                 json={"title": bob_title, "content": "Bob's own note."},
             )
@@ -225,7 +227,7 @@ class TestBacklinks:
 
         alice_note = (
             await client.post(
-                f"/v1/workspaces/{alice}/notes",
+                f"/api/v1/workspaces/{alice}/notes",
                 headers=_auth(ALICE),
                 json={"title": _unique("Alice tries"), "content": f"See [[{bob_title}]]."},
             )
@@ -233,7 +235,7 @@ class TestBacklinks:
 
         detail = (
             await client.get(
-                f"/v1/workspaces/{alice}/notes/{alice_note['id']}", headers=_auth(ALICE)
+                f"/api/v1/workspaces/{alice}/notes/{alice_note['id']}", headers=_auth(ALICE)
             )
         ).json()
         assert detail["outgoing_links"][0]["resolved"] is False
@@ -241,7 +243,7 @@ class TestBacklinks:
 
         # And the reverse direction must not leak either.
         bob_detail = (
-            await client.get(f"/v1/workspaces/{bob}/notes/{bob_note['id']}", headers=_auth(BOB))
+            await client.get(f"/api/v1/workspaces/{bob}/notes/{bob_note['id']}", headers=_auth(BOB))
         ).json()
         assert bob_detail["backlinks"] == []
 
@@ -250,14 +252,14 @@ class TestBacklinks:
         self_title = _unique("Self referential")
         note = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": self_title, "content": f"Me: [[{self_title}]]"},
             )
         ).json()["note"]
 
         detail = (
-            await client.get(f"/v1/workspaces/{workspace}/notes/{note['id']}", headers=_auth())
+            await client.get(f"/api/v1/workspaces/{workspace}/notes/{note['id']}", headers=_auth())
         ).json()
         assert detail["backlinks"] == [], "a note is not its own backlink"
 
@@ -275,13 +277,13 @@ class TestSuggestions:
 
         first_note = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": first_title, "content": "Content A.", **tag},
             )
         ).json()["note"]
         await client.post(
-            f"/v1/workspaces/{workspace}/notes",
+            f"/api/v1/workspaces/{workspace}/notes",
             headers=_auth(),
             json={"title": second_title, "content": "Content B.", **tag},
         )
@@ -290,7 +292,7 @@ class TestSuggestions:
         # one out of a global top-N.
         found = (
             await client.get(
-                f"/v1/workspaces/{workspace}/suggestions",
+                f"/api/v1/workspaces/{workspace}/suggestions",
                 headers=_auth(),
                 params={"note_id": first_note["id"], "limit": 20},
             )
@@ -310,13 +312,13 @@ class TestSuggestions:
 
         # Linking them must retire the suggestion: it is no longer unlinked.
         await client.patch(
-            f"/v1/workspaces/{workspace}/notes/{probe['source']['id']}",
+            f"/api/v1/workspaces/{workspace}/notes/{probe['source']['id']}",
             headers=_auth(),
             json={"content": f"Content A, now linking [[{second_title}]]."},
         )
         after = (
             await client.get(
-                f"/v1/workspaces/{workspace}/suggestions",
+                f"/api/v1/workspaces/{workspace}/suggestions",
                 headers=_auth(),
                 params={"note_id": probe["source"]["id"], "limit": 20},
             )
@@ -331,14 +333,14 @@ class TestSuggestions:
         anchor_tag = f"anchor-{uuid.uuid4().hex[:8]}"
         anchor = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": _unique("Anchor note"), "content": "x", "tags": [anchor_tag]},
             )
         ).json()["note"]
         neighbour = (
             await client.post(
-                f"/v1/workspaces/{workspace}/notes",
+                f"/api/v1/workspaces/{workspace}/notes",
                 headers=_auth(),
                 json={"title": _unique("Neighbour note"), "content": "y", "tags": [anchor_tag]},
             )
@@ -346,7 +348,7 @@ class TestSuggestions:
 
         found = (
             await client.get(
-                f"/v1/workspaces/{workspace}/suggestions",
+                f"/api/v1/workspaces/{workspace}/suggestions",
                 headers=_auth(),
                 params={"note_id": anchor["id"]},
             )
@@ -358,7 +360,9 @@ class TestSuggestions:
 
     async def test_suggestions_never_cross_workspaces(self, client):
         bob = await _workspace_of(BOB)
-        found = (await client.get(f"/v1/workspaces/{bob}/suggestions", headers=_auth(BOB))).json()
+        found = (
+            await client.get(f"/api/v1/workspaces/{bob}/suggestions", headers=_auth(BOB))
+        ).json()
         alice_ws = await _workspace_of(ALICE)
         pool = await asyncpg.create_pool(get_settings().database_url, min_size=1, max_size=1)
         try:

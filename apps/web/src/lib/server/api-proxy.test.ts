@@ -33,7 +33,9 @@ describe('resolveUpstream', () => {
   it('strips trailing slashes so a joined path cannot contain //', () => {
     const upstream = resolveUpstream({ apiBaseUrl: 'https://api.example.com///' });
     expect(upstream?.base).toBe('https://api.example.com');
-    expect(buildUpstreamUrl(upstream!, '/api/v1/meta')).toBe('https://api.example.com/v1/meta');
+    expect(buildUpstreamUrl(upstream!, '/api/v1/meta')).toBe(
+      'https://api.example.com/api/v1/meta'
+    );
   });
 
   it('falls back to an absolute PUBLIC_API_BASE_URL', () => {
@@ -77,39 +79,52 @@ describe('resolveUpstream', () => {
 describe('buildUpstreamUrl', () => {
   const upstream = { base: 'https://api.example.com', source: 'api_base_url' as const };
 
-  it('drops /api and keeps /v1', () => {
-    expect(buildUpstreamUrl(upstream, '/api/v1/meta')).toBe('https://api.example.com/v1/meta');
+  it('forwards the path unchanged, because both sides are /api/v1', () => {
+    // The old design mounted FastAPI at /v1 and stripped /api here. With one
+    // prefix end to end, forwarding is the identity — which is the point.
+    expect(buildUpstreamUrl(upstream, '/api/v1/meta')).toBe(
+      'https://api.example.com/api/v1/meta'
+    );
   });
 
   it('preserves the query string, which carries search and pagination', () => {
     expect(buildUpstreamUrl(upstream, '/api/v1/notes', '?limit=20&offset=40')).toBe(
-      'https://api.example.com/v1/notes?limit=20&offset=40'
-    );
-  });
-
-  it('does not duplicate /v1', () => {
-    // The bug this guards: pasting the spec's `.../api/v1` base form.
-    expect(buildUpstreamUrl(upstream, '/api/v1/v1/meta')).toBe(
-      'https://api.example.com/v1/v1/meta'
+      'https://api.example.com/api/v1/notes?limit=20&offset=40'
     );
   });
 
   it('collapses an upstream base that already ends in /api/v1', () => {
+    // The spec's API_BASE_URL form. Without the collapse this would be
+    // https://host/api/v1/api/v1/meta.
     const spec = { base: 'https://api.example.com/api/v1', source: 'api_base_url' as const };
-    expect(buildUpstreamUrl(spec, '/api/v1/meta')).toBe('https://api.example.com/v1/meta');
+    expect(buildUpstreamUrl(spec, '/api/v1/meta')).toBe(
+      'https://api.example.com/api/v1/meta'
+    );
   });
 
   it('collapses an upstream base that ends in /api', () => {
     const bare = { base: 'https://api.example.com/api', source: 'api_base_url' as const };
-    expect(buildUpstreamUrl(bare, '/api/v1/meta')).toBe('https://api.example.com/v1/meta');
+    expect(buildUpstreamUrl(bare, '/api/v1/meta')).toBe(
+      'https://api.example.com/api/v1/meta'
+    );
   });
 
-  it('serves the route root without a trailing slash', () => {
-    expect(buildUpstreamUrl(upstream, '')).toBe('https://api.example.com/v1');
+  it('serves the route root as /api/v1, not /', () => {
+    // `/` is FastAPI's documentation page, not an API endpoint.
+    expect(buildUpstreamUrl(upstream, '')).toBe('https://api.example.com/api/v1');
+    expect(buildUpstreamUrl(upstream, '/')).toBe('https://api.example.com/api/v1');
   });
 
-  it('keeps an already-upstream path usable', () => {
-    expect(buildUpstreamUrl(upstream, '/v1/meta')).toBe('https://api.example.com/v1/meta');
+  it('adds a missing leading slash rather than producing hostapi', () => {
+    expect(buildUpstreamUrl(upstream, 'api/v1/meta')).toBe(
+      'https://api.example.com/api/v1/meta'
+    );
+  });
+
+  it('relays a non-API path without inventing a prefix', () => {
+    // The proxy route is mounted under /api/v1, but /health is reachable on the
+    // same host and forwarding it verbatim is the honest behaviour.
+    expect(buildUpstreamUrl(upstream, '/health')).toBe('https://api.example.com/health');
   });
 });
 

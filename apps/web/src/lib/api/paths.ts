@@ -1,71 +1,97 @@
 /**
- * One definition of "what path do we send to FastAPI", used by both the browser
- * client and the same-origin proxy route.
+ * One definition of "what path do we send to FastAPI".
  *
- * Two callers with different inputs:
+ * ## The single fact this file exists to hold
  *
- *   - the browser passes `/v1/workspaces/{id}/notes` and needs it relative to
- *     the API base;
- *   - the proxy (`src/routes/api/v1/[...path]/+server.ts`) receives
- *     `/api/v1/workspaces/{id}/notes` and needs `/v1/workspaces/{id}/notes` to
- *     forward upstream.
+ * The API is versioned at `/api/v1`. That string appears **once**, in
+ * `API_PATH_PREFIX`, and everything else is derived from it: the browser URL,
+ * the proxy target, and the dev-server route. A previous design mounted FastAPI
+ * at `/v1` and let the browser call `/api/v1`, with a proxy translating between
+ * the two. Two spellings of one path meant every log line, doc example and test
+ * URL had to know which side of the proxy it was on — and a mismatch between the
+ * halves was invisible until it 404'd.
  *
- * Rather than duplicating the two remappings, both come from `API_PREFIX`:
- * change the prefix in one place and the client and the proxy stay in step.
- * A mismatch between them is the kind of bug that only shows up in dev, which
- * is exactly when it is cheapest to prevent.
+ * ## Resource paths, not versioned paths
+ *
+ * Callers express paths *relative to the version*:
+ *
+ *   `/workspaces/{id}/notes`   not   `/api/v1/workspaces/{id}/notes`
+ *
+ * `client.ts` prepends the prefix. This is deliberate:
+ *
+ *   - a caller cannot accidentally produce `/api/v1/api/v1/...`;
+ *   - bumping to `/api/v2` is a change in this file, not 40 call sites;
+ *   - the proxy and the client read the same constant, so they cannot disagree.
+ *
+ * `joinOrigin` still tolerates a caller that *does* pass a full versioned path,
+ * because `PUBLIC_API_BASE_URL` is operator-supplied and someone will paste
+ * `https://host/api/v1` into it.
  */
 
-/**
- * Everything before `/v1`: the segment the browser uses for the API *suffix*.
- *
- * Callers already build versioned paths (`wsPath()` returns
- * `/v1/workspaces/{id}/…`), so the prefix must not carry the version or the
- * relative URL becomes `/api/v1/v1/…`. Keeping the split explicit here is what
- * makes that impossible to get wrong at a call site.
- */
-export const API_PREFIX = '/api';
+/** `/api` — the routing namespace. Changing this moves the API, not the version. */
+export const API_NAMESPACE = '/api';
 
-/** The mount point FastAPI uses for every router — never stripped, never added. */
-export const API_VERSION_PREFIX = '/v1';
+/** `v1` — the version segment, without slashes. */
+export const API_VERSION = 'v1';
 
-/** `/api` + `/v1` — the full browser-facing prefix, for matching and display. */
-export const API_PATH_PREFIX = `${API_PREFIX}${API_VERSION_PREFIX}`;
+/** `/api/v1` — the full browser-facing and upstream prefix. */
+export const API_PATH_PREFIX = `${API_NAMESPACE}/${API_VERSION}`;
 
-/** True when `path` (a URL path) is addressed to the API. */
+/** True when `path` (a URL pathname) is addressed to this API. */
 export function isApiPath(path: string): boolean {
   return path === API_PATH_PREFIX || path.startsWith(`${API_PATH_PREFIX}/`);
 }
 
 /**
- * Translate a browser API path into the upstream path.
+ * Prefix a resource path.
  *
- * `/api/v1/notes?x=1` → `/v1/notes?x=1`: strip `/api`, keep `/v1`. A path that is
- * not under the prefix is returned unchanged, so a caller that already has an
- * upstream path does not need to check first.
+ * `'/workspaces/x/notes'` → `'/api/v1/workspaces/x/notes'`
+ *
+ * Idempotent: a path that already carries the prefix is returned unchanged, so a
+ * caller that passes a full path (a redirect target, a value from the server)
+ * does not get it twice.
  */
-export function toUpstreamPath(path: string): string {
-  if (!isApiPath(path)) return path;
-  return path.slice(API_PREFIX.length);
+export function apiPath(path: string): string {
+  if (isApiPath(path)) return path;
+  const withSlash = path.startsWith('/') ? path : `/${path}`;
+  return `${API_PATH_PREFIX}${withSlash}`;
 }
 
 /**
- * Join the configured origin with a browser API path.
+ * Translate a browser path into the path FastAPI serves.
  *
- * Only used when `PUBLIC_API_BASE_URL` is an **absolute** URL, which is the
- * explicitly-configured case and the one that cannot miss CORS.
+ * Since both are `/api/v1`, this is the identity for a correctly-prefixed path.
+ * It exists rather than being deleted so the proxy has one named place to state
+ * that fact, and because a path outside the prefix must be returned unchanged
+ * (the proxy forwards it as-is rather than guessing).
+ */
+export function toUpstreamPath(path: string): string {
+  return isApiPath(path) ? path : path;
+}
+
+/**
+ * Join a configured origin with a path, collapsing a duplicate prefix.
+ *
+ * Used only when `PUBLIC_API_BASE_URL` is an absolute URL, and always with a
+ * path that already carries the prefix. Handles the three plausible operator
+ * inputs without producing `/api/v1/api/v1/...`:
+ *
+ *   `https://host`          + `/api/v1/notes`   → `https://host/api/v1/notes`
+ *   `https://host/api/v1`   + `/api/v1/notes`   → `https://host/api/v1/notes`
+ *   `https://host/api`      + `/api/v1/notes`   → `https://host/api/v1/notes`
  */
 export function joinOrigin(origin: string, path: string): string {
   const trimmed = origin.replace(/\/+$/, '');
+
   if (trimmed.endsWith(API_PATH_PREFIX)) {
-    // The operator pasted the spec's full `.../api/v1` form. Treated as a base
-    // URL rather than an error, so the two plausible readings of
-    // `API_BASE_URL=http://host:8000/api/v1` both work instead of one producing
-    // `/api/v1/api/v1/…` and a 404 on every request.
     return `${trimmed}${path.slice(API_PATH_PREFIX.length)}`;
   }
-  if (trimmed.endsWith(API_PREFIX)) {
-    return `${trimmed}${path.slice(API_PREFIX.length)}`;
+  if (trimmed.endsWith(API_NAMESPACE)) {
+    return `${trimmed}${path.slice(API_NAMESPACE.length)}`;
   }
-  return `${trimmed}${path}`;
+  // No auto-prefixing: `client.ts` calls `apiPath()` before joining, so by the
+  // time a path reaches here it is already versioned. Prefixing again would be
+  // the double-prefix bug this function exists to avoid, and it would mangle a
+  // non-API path (`/health`) into one that does not exist.
+  return `${trimmed}${path.startsWith('/') ? path : `/${path}`}`;
 }

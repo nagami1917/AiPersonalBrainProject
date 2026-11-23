@@ -45,7 +45,7 @@ function choose(list: Workspace[], preferred: string | null): string | null {
 export async function loadWorkspaces(): Promise<void> {
   workspacesLoading.set(true);
   try {
-    const list = await apiFetch<Workspace[]>('/v1/workspaces');
+    const list = await apiFetch<Workspace[]>('/workspaces');
     workspaces.set(list);
     const next = choose(list, get(activeWorkspaceId) ?? remembered());
     activeWorkspaceId.set(next);
@@ -66,7 +66,7 @@ export function selectWorkspace(id: string): void {
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  const created = await apiFetch<Workspace>('/v1/workspaces', {
+  const created = await apiFetch<Workspace>('/workspaces', {
     method: 'POST',
     body: { name }
   });
@@ -76,7 +76,7 @@ export async function createWorkspace(name: string): Promise<Workspace> {
 }
 
 export async function renameWorkspace(id: string, name: string): Promise<void> {
-  const updated = await apiFetch<Workspace>(`/v1/workspaces/${id}`, {
+  const updated = await apiFetch<Workspace>(`/workspaces/${id}`, {
     method: 'PATCH',
     body: { name }
   });
@@ -84,7 +84,7 @@ export async function renameWorkspace(id: string, name: string): Promise<void> {
 }
 
 export async function deleteWorkspace(id: string): Promise<void> {
-  await apiFetch<void>(`/v1/workspaces/${id}`, { method: 'DELETE' });
+  await apiFetch<void>(`/workspaces/${id}`, { method: 'DELETE' });
   workspaces.update((list) => list.filter((w) => w.id !== id));
   if (get(activeWorkspaceId) === id) {
     const next = choose(get(workspaces), null);
@@ -97,11 +97,11 @@ export async function deleteWorkspace(id: string): Promise<void> {
  * Build a workspace-scoped API path.
  *
  * Throws rather than returning a path with an empty segment: a request to
- * `/v1/workspaces//notes` would 404 confusingly, and a request with a *wrong*
+ * `/workspaces//notes` would 404 confusingly, and a request with a *wrong*
  * id would be worse. Failing loudly here is the safe default.
  */
 export function wsPath(suffix: string): string {
   const id = get(activeWorkspaceId);
   if (!id) throw new NexusApiError(0, 'no_workspace', 'No workspace is selected.');
-  return `/v1/workspaces/${id}${suffix}`;
+  return `/workspaces/${id}${suffix}`;
 }

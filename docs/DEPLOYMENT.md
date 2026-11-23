@@ -117,7 +117,7 @@ this table used to say they were. They answer different questions:
 
 | Variable | Question it answers | Visible to |
 |---|---|---|
-| `PUBLIC_API_BASE_URL` | what origin should the *browser* send `/v1/...` to? | the browser (it is `PUBLIC_`) |
+| `PUBLIC_API_BASE_URL` | what origin should the *browser* send `/api/v1/...` to? | the browser (it is `PUBLIC_`) |
 | `API_BASE_URL` | where should the *server* forward `/api/v1/...`? | the Vercel function only |
 
 Empty `PUBLIC_API_BASE_URL` plus a set `API_BASE_URL` is the default same-origin
@@ -140,8 +140,14 @@ Two supported shapes. The default is the one that cannot be misconfigured.
 origin served the page, and one route forwards it to FastAPI:
 
 ```
-src/routes/api/v1/[...path]/+server.ts     /api/v1/* → {API_BASE_URL}/v1/*
+src/routes/api/v1/[...path]/+server.ts     /api/v1/* → {API_BASE_URL}/api/v1/*
 ```
+
+The path is forwarded **unchanged**. FastAPI mounts its routers at `/api/v1`
+(`app/core/config.py:API_PREFIX`) and the browser calls `/api/v1`, so there is
+no translation step to get wrong. An earlier design mounted FastAPI at `/v1`
+and had this route strip the `/api` segment; that worked, but it meant every log
+line, doc example and test URL had to know which side of the proxy it was on.
 
 That route runs under `vite dev` **and** as a Vercel function, so development and
 production use the same code path. Set `API_BASE_URL` to the FastAPI origin in
@@ -299,12 +305,12 @@ It reports which spelling satisfied each requirement, so an operator can see tha
 
 ```bash
 curl -fsS https://nexus-api.fly.dev/health
-curl -fsS https://nexus-api.fly.dev/v1/meta | jq .rate_limits
+curl -fsS https://nexus-api.fly.dev/api/v1/meta | jq .rate_limits
 ```
 
-`/v1/meta` is the capability document: supported MIME types, upload limit,
+`/api/v1/meta` is the capability document: supported MIME types, upload limit,
 embedding model, and the rate-limit budget. If the frontend renders but every
-request fails, compare `/v1/meta` on the API's own domain with the same path
+request fails, compare `/api/v1/meta` on the API's own domain with the same path
 through the frontend's origin — a 404 on one and 200 on the other is a proxy or
 base-URL mismatch, not an application error.
 

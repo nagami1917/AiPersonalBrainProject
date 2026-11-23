@@ -29,7 +29,7 @@ The concrete consequences, all of which are visible in the migrations:
 | Every policy is membership-based, not owner-based | `0007` |
 | Signup creates a workspace, not just a profile | `handle_new_user()` in `0001` |
 | Storage paths start with the workspace id | `0009` |
-| Every API route is `/v1/workspaces/{workspace_id}/…` | `apps/api/app/api/routes` |
+| Every API route is `/api/v1/workspaces/{workspace_id}/…` | `apps/api/app/api/routes` |
 
 ### 1.1 Roles
 
@@ -455,11 +455,37 @@ browser uploads directly → `POST …/documents` confirms and enqueues. The API
 | `0009_storage_policies.sql` | bucket, MIME/size limits, 4 path-scoped policies |
 | `0010_trigram_indexes.sql` | `pg_trgm` and 4 trigram indexes (deliberately skippable) |
 | `0011_grants.sql` | explicit grants; `anon` gets nothing |
+| `0012_note_links.sql` | `note_links`, backlinks, suggestion index |
+| `0013_audit_events.sql` | `audit_events`, `record_audit()` (append-only trail) |
+| `0014_workspace_select_owner.sql` | fix: owners can SELECT their own workspace |
+| `0015_workspace_member_bootstrap.sql` | fix: an owner can insert the first membership row |
+| `0016_audit_grants.sql` | fix: explicit `select` on `audit_events` for `authenticated` |
 
-The schema is validated against a real Postgres: **18 tables, 18 with RLS, 64 policies,
-63 indexes, 1 HNSW index, 3 XOR/kind constraints, 52 functions**, plus
-`supabase/tests/tenancy.sql` (isolation) and `apps/api/tests/db/` (grounding, citations, HTTP
-tenancy). `supabase/seed.sql` is idempotent — running it twice leaves identical data.
+The schema is validated against a real Postgres: **20 tables (all with RLS), 67 policies,
+79 indexes (1 HNSW), 52 functions, 3 XOR/kind constraints**, plus `supabase/tests/tenancy.sql` (isolation) and
+`apps/api/tests/db/` (grounding, citations, HTTP tenancy). `supabase/seed.sql` is idempotent —
+running it twice leaves identical data.
+
+### 7a. Workspace creation: the two policies that had to change
+
+`POST /workspaces` was broken, and nothing noticed, because the signup trigger
+(`handle_new_user()`) is `SECURITY DEFINER` and creates every seeded user's personal
+workspace *without consulting a policy*. The only path that needed a policy — an explicit
+create — had no test.
+
+Two separate bootstrap deadlocks had to be broken, in this order:
+
+| Dependency | Why it deadlocked | Fix |
+|---|---|---|
+| `insert … returning *` | `RETURNING` needs a SELECT policy that can see the new row, and the only one was `is_workspace_member(id)` — false for a workspace whose membership row does not exist yet | `0014`: `owner_id = auth.uid() or is_workspace_member(id)` |
+| first `workspace_members` row | the insert policy required `can_manage_workspace()`, which reads `workspace_members` — so the first row had to exist before it could be written | `0015`: additionally allow `user_id = auth.uid() and role = 'owner'` when the workspace is already yours |
+
+The second clause cannot be borrowed to reach another tenant: it pins the caller to
+`auth.uid()`, pins the role to `owner`, and requires `workspaces.owner_id = auth.uid()`.
+Delegation to other people is still `can_manage_workspace()` only.
+
+Both are covered by `TestWorkspaceCreation` in `apps/api/tests/db/test_api_workspaces.py`,
+which fails if either migration is reverted — each one was verified by reverting it.
 
 ---
 

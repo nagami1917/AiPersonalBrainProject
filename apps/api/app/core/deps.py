@@ -71,7 +71,7 @@ def admin_pool_dep(pool: asyncpg.Pool = Depends(db)) -> asyncpg.Pool:
 #
 # Two forms, because they answer different questions:
 #
-#   workspace_path   /v1/workspaces/{workspace_id}/...  → explicit, used by all
+#   workspace_path   /api/v1/workspaces/{workspace_id}/... → explicit, used by all
 #                    resource routes. Must be a member or it is a 404.
 #   active_workspace the caller's default workspace, used by routes that are
 #                    inherently personal (e.g. "which workspace am I in?").

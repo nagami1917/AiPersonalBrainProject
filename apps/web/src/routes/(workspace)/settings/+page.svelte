@@ -14,7 +14,7 @@
 
   onMount(async () => {
     try {
-      meta = await apiFetch<Meta>('/v1/meta');
+      meta = await apiFetch<Meta>('/meta');
     } catch (err) {
       error =
         err instanceof NexusApiError

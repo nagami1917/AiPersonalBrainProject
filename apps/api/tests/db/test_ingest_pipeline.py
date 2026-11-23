@@ -157,10 +157,24 @@ class TestStageOrder:
 
         async def hits() -> int:
             # Count only this document's chunks, so seeded sources do not mask it.
+            #
+            # Both limits are raised, not just the result count. `hybrid_search`
+            # ranks each arm over at most `p_candidate_count` rows (default 40)
+            # *before* fusing, so widening only `p_match_count` leaves the probe
+            # competing for a candidate slot. Every ingest test leaves its probe
+            # document behind, all of them share PROBE_TEXT, and `ts_rank_cd`
+            # gives identical text an identical score — so the newest probe sorts
+            # last among its own ties and drops out of the window once ~40 chunks
+            # match the query. That made this test fail only against a database
+            # that had been used, which is precisely the kind of state dependence
+            # a gate test must not have.
             return await conn.fetchval(
                 """
                 select count(*) from public.hybrid_search(
-                  p_workspace_id => $1::uuid, p_query => $2, p_match_count => 200
+                  p_workspace_id => $1::uuid,
+                  p_query        => $2,
+                  p_match_count  => 200,
+                  p_candidate_count => 200
                 ) where document_id = $3
                 """,
                 workspace_id,
