@@ -50,6 +50,16 @@ async def get_pool(settings: Settings) -> asyncpg.Pool:
             max_size=10,
             init=_init_connection,
             server_settings={"statement_timeout": str(STATEMENT_TIMEOUT_MS)},
+            # Supavisor — the pooler `DEPLOYMENT.md` tells you to use (:6543) —
+            # multiplexes several clients onto one backend connection. asyncpg's
+            # server-side prepared statements are per-connection, so a statement
+            # prepared on one backend and executed on another fails with
+            # `DuplicatePreparedStatementError` or
+            # `InvalidSQLStatementNameError`. Disabling the cache makes every
+            # query use the unnamed/simple path, which is what pgbouncer's own
+            # docs prescribe ("pool_mode=transaction requires
+            # statement_cache_size=0").
+            statement_cache_size=0,
         )
     return _pool
 

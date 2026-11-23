@@ -35,6 +35,7 @@ from app.api.routes import (
 )
 from app.core.config import API_PREFIX, get_settings
 from app.core.db import close_pool, get_pool
+from app.core.error_tracking import init_error_tracking
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging, install_request_logging
 from app.core.schema_guard import verify_schema
@@ -47,6 +48,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     log.info("starting api (env=%s)", settings.environment)
+    # Before the pool, so a crash during pool creation is itself reported.
+    app.state.error_tracking = init_error_tracking(settings)
     app.state.settings = settings
     pool = await get_pool(settings)
     # Boot-time schema guards, after the pool exists and before the first

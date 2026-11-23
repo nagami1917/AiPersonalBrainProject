@@ -218,6 +218,18 @@ class Settings(BaseSettings):
         if self.allowed_origins and self.cors_allowed_origins == _DEFAULT_CORS:
             self.cors_allowed_origins = self.allowed_origins
 
+        # A production deployment that kept the development CORS default would
+        # reject the browser's preflight while looking configured. Supabase auth
+        # itself is not CORS-bound (the SDK calls the Supabase origin, which
+        # sends its own headers), so this fails only once the frontend calls the
+        # API — the least obvious possible moment. Refuse at boot instead.
+        if self.environment == "production" and self.cors_allowed_origins == _DEFAULT_CORS:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS is still the development default "
+                f"({_DEFAULT_CORS}). Set it to the deployed frontend origin, "
+                "e.g. CORS_ALLOWED_ORIGINS=https://your-app.vercel.app"
+            )
+
         # MAX_UPLOAD_SIZE_MB → MAX_UPLOAD_BYTES (bytes win when both are set)
         if not self.max_upload_bytes:
             self.max_upload_bytes = self.max_upload_size_mb * 1024 * 1024
