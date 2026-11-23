@@ -115,6 +115,39 @@ If M3 slips, everything else waits. A beautiful app over an ungrounded model is 
 
 ---
 
+## Milestone numbering, and the second vocabulary
+
+GitHub milestones mirror this file exactly — M0 through M6, with the same names
+and the same "done / partly" verdicts — and then continue with three that this
+file never had:
+
+| GitHub milestone | Where it came from |
+|---|---|
+| M0 Foundation · M1 Data & Tenancy · M2 Ingest · M3 Recall · M4 Usable App | this file |
+| M5 Connect · M6 Harden & Launch | this file |
+| **M7 Knowledge Graph Visualisation** | UI half of M5, split out so it can be scheduled separately from the data work |
+| **M8 Learning Intelligence** | new. No foundation exists — see below |
+| **M9 Production Deployment** | new. The deployment checks that gate a readiness claim |
+
+An external review proposed a different ten-milestone scheme
+(`M0 Foundation · M1 Authentication and Workspaces · M2 Dashboard and UI ·
+M3 Notes and Collections · M4 Document Management · M5 AI Embeddings and Search ·
+M6 RAG AI Assistant · M7 Knowledge Graph · M8 Learning Intelligence ·
+M9 Production Deployment`).
+
+**That scheme was not adopted**, and the reason is worth recording. Its M1–M6
+describe work that is already finished and already tested — authentication,
+workspaces, notes, collections, documents, embeddings, search and the RAG
+assistant all exist. Creating milestones for them would have produced a board
+where six of ten milestones were satisfied on the day they were created, which
+makes the remaining four invisible. The repo's own numbering tracks the order the
+work actually had to happen in, so it is the one that stays.
+
+Two items from the proposal *are* new and were added as M7-M9 rather than
+discarded. M8 in particular is not a refinement of anything: there is no
+flashcard, quiz, reviewer or progress schema, no route, and no UI. It is filed as
+an issue so the milestone list cannot imply otherwise.
+
 ## Where each milestone actually stands
 
 Checked against the repository, not against intent. The "Done when" line above is
