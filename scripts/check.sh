@@ -22,7 +22,10 @@ else
 fi
 
 echo "==> frontend: unit tests"
-(cd apps/web && npm run test --silent)
+# `svelte-kit sync` first: the app's tsconfig extends .svelte-kit/tsconfig.json,
+# which only exists after a sync. A fresh clone (and CI) has neither, and the
+# failure is a confusing "Cannot find module" rather than a test result.
+(cd apps/web && npx svelte-kit sync && npm run test --silent)
 
 echo "==> frontend: svelte-check"
 (cd apps/web && npm run check)

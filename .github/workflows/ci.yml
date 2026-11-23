@@ -84,7 +84,14 @@ jobs:
 
       - name: frontend unit tests
         working-directory: apps/web
-        run: npm run test -- --silent
+        # `svelte-kit sync` generates .svelte-kit/tsconfig.json, which the app's
+        # tsconfig.json extends. Vite reads it to transform the test files, so
+        # without this step a fresh checkout fails with "Cannot find module
+        # ./.svelte-kit/tsconfig.json" — invisible locally, where the directory
+        # already exists from `npm run dev`.
+        run: |
+          npx svelte-kit sync
+          npm run test -- --silent
 
       - name: svelte-check
         working-directory: apps/web
@@ -151,6 +158,10 @@ jobs:
       PGHOST: 127.0.0.1
       PGUSER: postgres
       PGPASSWORD: postgres
+      # Without this, a `psql` without `-d` connects to the default `postgres`
+      # database while the migrations ran against `nexus`. The table-count
+      # assertion then reads the wrong database and fails for the wrong reason.
+      PGDATABASE: nexus
 
     steps:
       - uses: actions/checkout@v4
@@ -235,8 +246,8 @@ jobs:
         # file count against the recorded schema version catches a migration
         # that silently did nothing.
         run: |
-          applied=$(psql -tAc "select count(*) from information_schema.tables
-                               where table_schema = 'public' and table_type = 'BASE TABLE'")
+          applied=$(psql -d nexus -tAc "select count(*) from information_schema.tables
+                                        where table_schema = 'public' and table_type = 'BASE TABLE'")
           echo "public tables: $applied"
           if [ "$applied" -lt 15 ]; then
             echo "::error::expected at least 15 public tables, found $applied — a migration did not run"
