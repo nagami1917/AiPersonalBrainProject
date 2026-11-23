@@ -221,6 +221,36 @@ async def list_documents(
     return {"items": items, "next_cursor": next_cursor}
 
 
+# Declared BEFORE `/{document_id}`: routes match in declaration order, so a
+# `GET /documents/trash` declared later would be captured by the detail route.
+@router.get("/trash", response_model=dict)
+async def list_document_trash(
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Deleted documents still inside their retention window."""
+    rows = await repo.list_deleted_documents(conn, ctx.id)
+    counts = await repo.purge_due_count(conn, ctx.id, settings.trash_retention_days)
+    items = []
+    for row in rows:
+        data = dict(row)
+        deleted_at = data["deleted_at"]
+        items.append(
+            {
+                "id": str(data["id"]),
+                "kind": "document",
+                "title": data["title"],
+                "filename": data["filename"],
+                "mime_type": data["mime_type"],
+                "file_size": data["file_size"],
+                "deleted_at": deleted_at,
+                "expires_at": deleted_at + timedelta(days=settings.trash_retention_days),
+            }
+        )
+    return {"items": items, "retention_days": settings.trash_retention_days, "counts": counts}
+
+
 @router.get("/{document_id}", response_model=DocumentDetail)
 async def get_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> DocumentDetail:
     record = await repo.get_document(conn, document_id, ctx.id)
@@ -269,7 +299,18 @@ async def update_document(
 
 
 @router.delete("/{document_id}", status_code=204, response_class=Response, response_model=None)
-async def delete_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Response:
+async def delete_document(
+    document_id: str,
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Move a document to the trash, and schedule its purge.
+
+    The storage object is kept until the purge actually runs, which is what
+    makes restore possible: the bytes were never deleted, only the row was
+    marked. Two-phase rather than immediate for the same reason as notes.
+    """
     tenancy.require_write(ctx)
     existing = await repo.get_document(conn, document_id, ctx.id)
     if not await repo.soft_delete_document(conn, document_id, ctx.id):
@@ -284,13 +325,49 @@ async def delete_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -
         target_id=document_id,
         target_label=existing["title"] if existing else None,
     )
+    retention_days = settings.trash_retention_days
+    if retention_days > 0:
+        await conn.fetchval(
+            """select public.enqueue_job(
+                 p_workspace_id => $1, p_job_type => 'purge', p_document_id => $2,
+                 p_run_after   => now() + make_interval(days => $3))""",
+            ctx.id,
+            document_id,
+            retention_days,
+        )
+    else:
+        await conn.fetchval(
+            """select public.enqueue_job(
+                 p_workspace_id => $1, p_job_type => 'purge', p_document_id => $2)""",
+            ctx.id,
+            document_id,
+        )
+    return Response(status_code=204)
+
+
+@router.post("/{document_id}/restore", response_model=DocumentSummary)
+async def restore_document(document_id: str, ctx: WorkspaceCtx, conn: UserConn) -> DocumentSummary:
+    """Undo a deletion, then re-index.
+
+    The stored file was never removed, so this only un-marks the row — but the
+    chunks were deleted when it was trashed, so the document comes back as
+    'pending' and is re-ingested from the original bytes.
+    """
+    tenancy.require_write(ctx)
+    if not await repo.restore_document(conn, document_id, ctx.id):
+        raise NotFound("No deleted document with that id")
+
     await conn.fetchval(
         """select public.enqueue_job(
-             p_workspace_id => $1, p_job_type => 'purge', p_document_id => $2)""",
+             p_workspace_id => $1, p_job_type => 'ingest_document', p_document_id => $2)""",
         ctx.id,
         document_id,
     )
-    return Response(status_code=204)
+    record = await repo.get_document(conn, document_id, ctx.id)
+    assert record is not None
+    return _summary_record(
+        record, await repo.tag_names(conn, workspace_id=ctx.id, document_id=document_id)
+    )
 
 
 @router.get("/{document_id}/download-url", response_model=dict)

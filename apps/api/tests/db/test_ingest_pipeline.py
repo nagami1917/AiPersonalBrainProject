@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 
 import asyncpg
 import pytest
-from app.ai.ingestion import TARGET_TOKENS
+from app.ai.ingestion import TARGET_TOKENS, ExtractionError
 from app.core.config import get_settings
 from app.workers import ingest
 
@@ -298,3 +298,86 @@ class TestArmExclusivity:
         assert all(h.keyword_rank is None for h in semantic), "semantic leaked keyword hits"
         assert all(h.vector_rank is None for h in keyword), "keyword leaked vector hits"
         assert len(hybrid) >= len(semantic), "hybrid is a union of both arms"
+
+
+class TestLoadFailureIsVisible:
+    """A failure before the pipeline starts must still mark the document.
+
+    `run_ingest` built its `IngestTarget` outside the `try`, and building it is
+    what downloads, validates and extracts the file. So a missing object, a bad
+    signature, or a storage path escaping its workspace left the document at
+    `status='pending'` with a null `error_message` — and the UI shows exactly
+    that, as a progress indicator that never advances.
+
+    The worker's outer handler could not fix it either: it marks the *job*
+    failed, but the document id is only known once `_load_target` returns.
+    """
+
+    async def test_a_path_escape_marks_the_document_failed(self, conn, embedder):
+        workspace_id = await conn.fetchval(
+            "select id from public.workspaces where owner_id = $1 and personal limit 1", ALICE
+        )
+        document_id = uuid.uuid4()
+        # file_path in a *different* workspace's prefix: the guard in
+        # _load_target refuses to download it, which is the failure under test.
+        await conn.execute(
+            """
+            insert into public.documents
+              (id, workspace_id, uploaded_by, title, filename, mime_type,
+               file_path, file_size, status)
+            values ($1::uuid, $2::uuid, $3::uuid, 'escape-probe', 'escape.pdf',
+                    'application/pdf', $4, 128, 'pending')
+            """,
+            document_id,
+            workspace_id,
+            ALICE,
+            f"{uuid.uuid4()}/{document_id}/escape.pdf",
+        )
+
+        with pytest.raises(ExtractionError):
+            await ingest.run_ingest(
+                conn,
+                job_id=str(uuid.uuid4()),
+                kind="document",
+                source_id=str(document_id),
+                embedder=embedder,
+                settings=get_settings(),
+            )
+
+        row = await conn.fetchrow(
+            "select status, error_message, completed_at from public.documents where id=$1",
+            document_id,
+        )
+        assert row["status"] == "failed", "a failed load must not leave the document pending"
+        assert row["error_message"], "the user needs a reason, not just a state"
+        assert row["completed_at"] is not None
+        await conn.execute("delete from public.documents where id=$1", document_id)
+
+    async def test_a_ready_document_survives_a_failed_reindex(self, conn, embedder):
+        """A reindex that fails must not un-cite a document that works.
+
+        The interesting asymmetry: 'failed' is the right answer for a first
+        ingest, and the wrong one for a re-index of something already searchable.
+        """
+        document_id = await _document(conn)
+        await _ingest(conn, document_id, embedder)
+        assert (
+            await conn.fetchval("select status from public.documents where id=$1", document_id)
+        ) == "ready"
+
+        # Point the row at a path outside its workspace and re-ingest: the load
+        # fails, but the already-ready document must stay ready.
+        await conn.execute(
+            "update public.documents set file_path=$2, raw_text=null where id=$1",
+            document_id,
+            f"{uuid.uuid4()}/{document_id}/moved.pdf",
+        )
+        with pytest.raises(ExtractionError):
+            await _ingest(conn, document_id, embedder)
+
+        row = await conn.fetchrow(
+            "select status, error_message from public.documents where id=$1", document_id
+        )
+        assert row["status"] == "ready", "a working document was un-cited by a failed reindex"
+        assert row["error_message"]
+        await conn.execute("delete from public.documents where id=$1", document_id)

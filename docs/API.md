@@ -204,8 +204,14 @@ Full document incl. `raw_text`, `summary`, `processing_stage`, tag list, chunk c
 #### `PATCH …/documents/{id}`
 Updatable: `title`, `collection_id`, `tags` (full replace). Requires `member` or above.
 
+#### `GET …/documents/trash`
+Deleted documents inside their retention window, each with `expires_at`. Mirrors `…/notes/trash`.
+
 #### `DELETE …/documents/{id}`
-Soft delete (`deleted_at = now()`), enqueues `purge`. Returns `204`. Chunks are removed immediately so the document stops appearing in retrieval, before the storage object is cleaned up.
+Soft delete (`deleted_at = now()`), returns `204`. Chunks are removed immediately so the document stops appearing in retrieval at once. The **storage object is kept** until the purge runs, which is what makes restore possible; `purge` is scheduled `TRASH_RETENTION_DAYS` out (default 30) rather than immediately.
+
+#### `POST …/documents/{id}/restore`
+Undo a deletion. Returns the document as `pending` and re-queues ingestion from the original bytes — the file was never removed, but its chunks were.
 
 #### `POST …/documents/{id}/reprocess`
 Force re-extraction + re-chunking + re-embedding. Accepts `{"reason": "…"}`. Used after a chunking-settings change or a previously failed ingest.
@@ -234,12 +240,39 @@ search ranking and both can be cited.
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `…/notes` | Create from `{title, content, content_format?, collection_id, tags}` → enqueues `ingest_note`, returns `202` with `{note, job_id}` |
-| `GET` | `…/notes` | List; filters `status`, `collection_id`, `limit`, `cursor` |
+| `GET` | `…/notes` | List; filters `status`, `collection_id`, `tag`, `q`, `limit`, `cursor` |
+| `GET` | `…/notes/trash` | Deleted notes inside their retention window, each with `expires_at` |
 | `GET` | `…/notes/{id}` | Full note incl. `content`, `content_format`, `summary`, tags, `chunk_count` |
 | `PATCH` | `…/notes/{id}` | Edit `title`/`content`/`collection_id`/`tags`. A content edit bumps `version` and enqueues a re-index |
-| `DELETE` | `…/notes/{id}` | Soft delete + enqueue `purge`; chunks removed immediately |
+| `DELETE` | `…/notes/{id}` | Soft delete; chunks removed immediately, purge scheduled `TRASH_RETENTION_DAYS` out |
+| `POST` | `…/notes/{id}/restore` | Undo a deletion; returns the note as `pending` and re-indexes it |
 | `GET` | `…/notes/{id}/status` | Same shape as document status |
 | `POST` | `…/notes/{id}/reprocess` | Force re-chunk + re-embed |
+
+#### Note search: two different questions
+
+`q` on the list endpoint is a **substring filter** over title and body, answered from Postgres in
+one query. `POST /search` is **semantic** retrieval: it embeds the query, costs an API call, and
+returns passages. They are not interchangeable, and the list endpoint deliberately does not use
+retrieval for its search box — a keystroke should not bill an embedding.
+
+`q` matches literally: it is implemented with `position(lower(x) in lower(q))`, not `ILIKE`, so a
+query containing `%` or `_` does not act as a wildcard. Searching for `100%` finds the notes that
+contain `100%`, not every note.
+
+#### Delete and restore
+
+Deletion is two-phase. The row is marked `deleted_at` and vanishes from every view immediately, but
+it is only removed for good once `TRASH_RETENTION_DAYS` has elapsed (default 30). Until then it is
+listed by `…/trash` with an `expires_at`, and `…/restore` brings it back.
+
+Restoring returns the note as `pending` and re-queues ingestion. The chunks were deleted when the
+note was trashed, so a restore that only cleared `deleted_at` would produce a note that is visible
+but silently unsearchable.
+
+A purge job that runs early is a **no-op**: eligibility is re-checked in SQL against `deleted_at`,
+not trusted from the job's `run_after`, because retention is configured per environment and a job
+may have been queued under a different value.
 
 `save-conversation` (turning an answer into a note) is **not implemented**: it is a genuinely
 useful capture path, but it needs the citation snapshot carried into the new note's metadata and is

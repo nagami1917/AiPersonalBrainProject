@@ -12,6 +12,7 @@
   import type { DocumentSummary, Meta } from '$lib/api/types';
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
+  import TrashPanel from '$lib/components/TrashPanel.svelte';
   import FileUploader from '$lib/components/documents/FileUploader.svelte';
   import DocumentCard from '$lib/components/documents/DocumentCard.svelte';
   import { formatBytes } from '$lib/utils/format';
@@ -41,6 +42,8 @@
   }
 
   onMount(load);
+
+  let view = $state<'library' | 'trash'>('library');
 
   async function remove(id: string) {
     try {
@@ -73,11 +76,35 @@
     {/if}
   </header>
 
+  <div class="flex rounded-lg border border-ink-800 p-0.5">
+    <button
+      class="rounded-md px-3 py-1 text-xs transition-colors"
+      class:bg-ink-800={view === 'library'}
+      class:text-ink-100={view === 'library'}
+      class:text-ink-500={view !== 'library'}
+      onclick={() => (view = 'library')}
+    >
+      Library
+    </button>
+    <button
+      class="rounded-md px-3 py-1 text-xs transition-colors"
+      class:bg-ink-800={view === 'trash'}
+      class:text-ink-100={view === 'trash'}
+      class:text-ink-500={view !== 'trash'}
+      onclick={() => (view = 'trash')}
+    >
+      Trash
+    </button>
+  </div>
+
   {#if error}
     <ErrorNotice message={error.message} code={error.code} />
   {/if}
 
-  <FileUploader {meta} onuploaded={() => void load()} />
+  {#if view === 'trash'}
+    <TrashPanel kind="documents" onrestored={() => void load()} />
+  {:else}
+    <FileUploader {meta} onuploaded={() => void load()} />
 
   {#if loading}
     <div class="space-y-2">
@@ -95,4 +122,5 @@
       {/each}
     </ul>
   {/if}
+{/if}
 </div>

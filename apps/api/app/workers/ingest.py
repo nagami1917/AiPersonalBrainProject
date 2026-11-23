@@ -80,6 +80,33 @@ async def _fail(conn: asyncpg.Connection, target: IngestTarget, message: str) ->
     )
 
 
+async def _fail_by_id(conn: asyncpg.Connection, *, kind: str, source_id: str, message: str) -> None:
+    """Mark a source failed when its version could not be loaded.
+
+    The version-guarded `_fail` needs an `IngestTarget`; this is the same write
+    for the case where building that target is what failed. It does not filter
+    on version because there is none to compare against — a load failure cannot
+    have written chunks, so there is nothing stale to protect.
+
+    `status` is only downgraded from a non-final state: a document that is
+    already `ready` (a reindex of a good file failing, say) keeps its chunks and
+    its citable status, and the error is recorded alongside. Losing a working
+    document because a later reindex hit a transient error would be the worse
+    failure.
+    """
+    assignments = (
+        "status = case when status = 'ready' then 'ready' else 'failed' end, "
+        "processing_stage = null, error_message = $2"
+    )
+    if kind == "document":
+        assignments += ", completed_at = now()"
+    await conn.execute(
+        f"update public.{_table(kind)} set {assignments} where id=$1",
+        source_id,
+        message,
+    )
+
+
 async def _load_target(
     conn: asyncpg.Connection,
     *,
@@ -178,7 +205,23 @@ async def run_ingest(
     embedder: Embedder,
     settings: Settings,
 ) -> None:
-    target = await _load_target(conn, kind=kind, source_id=source_id, settings=settings)
+    try:
+        # `_load_target` is inside the try on purpose. It downloads the file,
+        # validates its content and extracts the text — every one of which can
+        # fail — and when it was outside, a failed download or a storage path
+        # escaping its workspace left the document at `status='pending'` with a
+        # null error message forever. The worker's outer handler marks the *job*
+        # failed, but it cannot reach the row: `_load_target` never returned the
+        # document id. The status is what the UI shows, so this was a silent
+        # spinner rather than a visible error.
+        target = await _load_target(conn, kind=kind, source_id=source_id, settings=settings)
+    except ExtractionError as exc:
+        await _fail_by_id(conn, kind=kind, source_id=source_id, message=exc.message)
+        raise
+    except Exception as exc:
+        await _fail_by_id(conn, kind=kind, source_id=source_id, message=str(exc)[:500])
+        raise
+
     if target is None:
         log.warning("ingest: %s %s no longer exists", kind, source_id)
         return

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import asyncpg
@@ -55,11 +56,26 @@ async def list_notes(
     conn: UserConn,
     status: str | None = None,
     collection_id: str | None = None,
+    tag: str | None = None,
     limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
 ) -> dict[str, Any]:
+    """List notes. `q` is a substring filter over title and body.
+
+    This is the search box on the notes list, not the semantic search endpoint:
+    it filters the caller's own notes without embedding a query, so typing stays
+    offline and instant. `POST /search` remains the way to search by meaning.
+    """
     records = await repo.list_notes(
-        conn, ctx.id, status=status, collection_id=collection_id, limit=limit, cursor=cursor
+        conn,
+        ctx.id,
+        status=status,
+        collection_id=collection_id,
+        query=q,
+        tag=tag,
+        limit=limit,
+        cursor=cursor,
     )
     items = [_summary(r).model_dump(mode="json") for r in records]
     next_cursor = records[-1]["updated_at"].isoformat() if len(records) == limit else None
@@ -108,6 +124,48 @@ async def create_note(
     return {
         "note": _summary(record, payload.tags).model_dump(mode="json"),
         "job_id": str(job_id),
+    }
+
+
+# Declared BEFORE `/{note_id}` on purpose: FastAPI matches routes in
+# declaration order, so a `GET /notes/trash` that came later would be captured
+# by the detail route and fail with a 422 on the note-id path parameter.
+@router.get("/trash", response_model=dict)
+async def list_trash(
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Everything in the trash, with how long it has left.
+
+    Registered before `/{note_id}` would otherwise match "trash" as a note id —
+    FastAPI matches in declaration order, and this route is declared above the
+    detail route for that reason.
+
+    `expires_at` is computed from `deleted_at` rather than stored, so changing
+    `trash_retention_days` applies to items already in the trash instead of only
+    to new deletions.
+    """
+    notes = await repo.list_deleted_notes(conn, ctx.id)
+    counts = await repo.purge_due_count(conn, ctx.id, settings.trash_retention_days)
+    items = []
+    for row in notes:
+        data = dict(row)
+        deleted_at = data["deleted_at"]
+        items.append(
+            {
+                "id": str(data["id"]),
+                "kind": "note",
+                "title": data["title"],
+                "snippet": (data["content"] or "")[:280],
+                "deleted_at": deleted_at,
+                "expires_at": deleted_at + timedelta(days=settings.trash_retention_days),
+            }
+        )
+    return {
+        "items": items,
+        "retention_days": settings.trash_retention_days,
+        "counts": counts,
     }
 
 
@@ -209,17 +267,72 @@ async def update_note(
 
 
 @router.delete("/{note_id}", status_code=204, response_class=Response, response_model=None)
-async def delete_note(note_id: str, ctx: WorkspaceCtx, conn: UserConn) -> Response:
+async def delete_note(
+    note_id: str,
+    ctx: WorkspaceCtx,
+    conn: UserConn,
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Move a note to the trash, and schedule its purge.
+
+    Deleting is a two-phase operation. The row is marked `deleted_at` and
+    disappears from every user-facing view immediately, but it is only
+    hard-deleted once `trash_retention_days` has passed. That window is what
+    makes `POST /{note_id}/restore` meaningful.
+
+    The purge is scheduled with an explicit `run_after` rather than the
+    helper's default of `now()`. The original code let the worker delete the
+    row seconds later, which made recovery impossible in practice even though
+    the schema had a `deleted_at` column.
+    """
     tenancy.require_write(ctx)
     if not await repo.soft_delete_note(conn, note_id, ctx.id):
         raise NotFound("Note not found")
+
+    retention_days = settings.trash_retention_days
+    if retention_days > 0:
+        await conn.fetchval(
+            """select public.enqueue_job(
+                 p_workspace_id => $1, p_job_type => 'purge', p_note_id => $2,
+                 p_run_after   => now() + make_interval(days => $3))""",
+            ctx.id,
+            note_id,
+            retention_days,
+        )
+    else:
+        # Retention disabled: purge now, and say so rather than leaving the row
+        # in an in-between state forever.
+        await conn.fetchval(
+            """select public.enqueue_job(
+                 p_workspace_id => $1, p_job_type => 'purge', p_note_id => $2)""",
+            ctx.id,
+            note_id,
+        )
+    return Response(status_code=204)
+
+
+@router.post("/{note_id}/restore", response_model=NoteSummary)
+async def restore_note(note_id: str, ctx: WorkspaceCtx, conn: UserConn) -> NoteSummary:
+    """Undo a deletion.
+
+    Restoring re-indexes: the chunks were removed when the note was trashed, so
+    a restored note that is not re-ingested would be visible but unsearchable —
+    the most confusing possible outcome. It comes back as 'pending' and the
+    normal pipeline makes it citable again.
+    """
+    tenancy.require_write(ctx)
+    if not await repo.restore_note(conn, note_id, ctx.id):
+        raise NotFound("No deleted note with that id")
+
     await conn.fetchval(
         """select public.enqueue_job(
-             p_workspace_id => $1, p_job_type => 'purge', p_note_id => $2)""",
+             p_workspace_id => $1, p_job_type => 'ingest_note', p_note_id => $2)""",
         ctx.id,
         note_id,
     )
-    return Response(status_code=204)
+    record = await repo.get_note(conn, note_id, ctx.id)
+    assert record is not None
+    return _summary(record, await repo.tag_names(conn, workspace_id=ctx.id, note_id=note_id))
 
 
 @router.get("/{note_id}/status", response_model=StatusResponse)

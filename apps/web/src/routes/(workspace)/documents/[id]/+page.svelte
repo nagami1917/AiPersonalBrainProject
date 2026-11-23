@@ -15,6 +15,7 @@
   import ErrorNotice from '$lib/components/ErrorNotice.svelte';
   import ProcessingStatus from '$lib/components/documents/ProcessingStatus.svelte';
   import DocumentPreview from '$lib/components/documents/DocumentPreview.svelte';
+  import FilePreview from '$lib/components/documents/FilePreview.svelte';
   import { formatBytes, relativeTime } from '$lib/utils/format';
 
   let document = $state<DocumentDetail | null>(null);
@@ -156,6 +157,7 @@
       </section>
     {/if}
 
-    <DocumentPreview {document} />
+    <FilePreview {document} />
+      <DocumentPreview {document} />
   {/if}
 </div>

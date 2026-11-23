@@ -16,6 +16,7 @@ from app.ai.providers import build_embedder, build_llm
 from app.core.config import get_settings
 from app.core.db import close_pool, get_pool
 from app.core.logging import configure_logging
+from app.repositories import knowledge as repo
 from app.workers import enrich, ingest
 from app.workers.queue import (
     Job,
@@ -66,36 +67,82 @@ async def handle_job(job: Job, pool, embedder, llm, settings) -> None:  # type: 
 
 
 async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-untyped-def]
-    """Hard-delete a soft-deleted source, and its storage object if it has one."""
+    """Hard-delete a soft-deleted source, and its storage object if it has one.
+
+    Only runs once the retention window has elapsed. The check is repeated in
+    `repo.purge_*` (in SQL, against `deleted_at`) rather than trusted from the
+    job's `run_after`: retention is configured per environment, so a job queued
+    under one value could run under another, and the database is the only thing
+    that knows when the deletion actually happened. An early job is a no-op that
+    logs, not data loss.
+    """
     target = job.target
     if target is None:
         return
     kind, source_id = target
+    retention_days = settings.trash_retention_days
 
+    file_path = await _claim_for_purge(conn, kind=kind, source_id=source_id, days=retention_days)
+    if file_path is _NOT_DELETED:
+        return
+
+    # The row is gone by the time we get here; the object is best-effort. A
+    # storage failure must not fail the job, because retrying would try to
+    # delete an object whose row no longer exists — the job would retry five
+    # times and then dead-letter, permanently. An orphaned object is cleaned up
+    # by the bucket's lifecycle rules.
+    if file_path:
+        await _delete_storage_object(settings, file_path)
+
+
+# Distinguishes "the row was deleted and it had no file" (None) from "nothing was
+# deleted" — a plain Optional would collapse those two very different outcomes.
+_NOT_DELETED = object()
+
+
+async def _claim_for_purge(  # type: ignore[no-untyped-def]
+    conn, *, kind: str, source_id: str, days: int
+):
+    """Delete the row if it is eligible; return its `file_path` if it was.
+
+    Returns `_NOT_DELETED` when nothing was removed, so the caller can stay a
+    straight line instead of a ladder of early returns.
+    """
     if kind == "note":
         row = await conn.fetchrow("select deleted_at from public.notes where id=$1", source_id)
         if row is None or row["deleted_at"] is None:
             log.info("purge skipped: note %s is not soft-deleted", source_id)
-            return
-        await conn.execute("delete from public.notes where id=$1", source_id)
-        return
+            return _NOT_DELETED
+        if not await repo.purge_note(conn, source_id, days):
+            log.info(
+                "purge deferred: note %s is still inside its %s-day retention window",
+                source_id,
+                days,
+            )
+            return _NOT_DELETED
+        return None
 
     row = await conn.fetchrow(
         "select file_path, deleted_at from public.documents where id=$1", source_id
     )
-    if row is None:
-        return
-    if row["deleted_at"] is None:
+    if row is None or row["deleted_at"] is None:
         log.info("purge skipped: document %s is not soft-deleted", source_id)
-        return
-
-    if row["file_path"]:
-        import httpx
-
-        url = (
-            f"{settings.supabase_url}/storage/v1/object/"
-            f"{settings.storage_bucket}/{row['file_path']}"
+        return _NOT_DELETED
+    if not await repo.purge_document(conn, source_id, days):
+        log.info(
+            "purge deferred: document %s is still inside its %s-day retention window",
+            source_id,
+            days,
         )
+        return _NOT_DELETED
+    return row["file_path"]
+
+
+async def _delete_storage_object(settings, file_path: str) -> None:  # type: ignore[no-untyped-def]
+    import httpx
+
+    url = f"{settings.supabase_url}/storage/v1/object/{settings.storage_bucket}/{file_path}"
+    try:
         async with httpx.AsyncClient(timeout=60) as client:
             await client.delete(
                 url,
@@ -104,8 +151,8 @@ async def purge_document(conn, job: Job, settings) -> None:  # type: ignore[no-u
                     "apikey": settings.supabase_service_role_key,
                 },
             )
-
-    await conn.execute("delete from public.documents where id=$1", source_id)
+    except Exception:
+        log.exception("purge: could not delete storage object %s", file_path)
 
 
 async def worker_loop(slot: int) -> None:
