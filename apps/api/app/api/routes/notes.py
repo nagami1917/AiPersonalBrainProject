@@ -8,7 +8,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
-from app.core import tenancy
+from app.core import audit, tenancy
 from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx
 from app.core.errors import Forbidden, NotFound
@@ -33,6 +33,26 @@ _STAGE_PROGRESS = {
     "embedding": 70,
     "entities": 90,
 }
+
+
+async def _new_link_titles(conn: asyncpg.Connection, note_id: str, titles: list[str]) -> list[str]:
+    """Which of `titles` are newly linked from this note, case-insensitively.
+
+    `replace_note_links` deletes every outgoing link and re-inserts the set on
+    each save, because the body is the source of truth. So "a link was created"
+    can only mean the *delta* — recording the full set every time would emit an
+    identical event on every autosave and drown the trail in events that
+    describe no change at all.
+
+    Returns an empty list when nothing is new, which is the common case.
+    """
+    existing = {
+        row["target_title"].lower()
+        for row in await conn.fetch(
+            "select target_title from public.note_links where source_note_id = $1", note_id
+        )
+    }
+    return [t for t in titles if t.lower() not in existing]
 
 
 def _summary(record: asyncpg.Record, tags: list[str] | None = None) -> NoteSummary:
@@ -113,7 +133,22 @@ async def create_note(
     # created now may satisfy a [[link]] someone wrote yesterday, so resolve
     # outstanding references to the new title before storing this note's own.
     await repo.reindex_backlinks_to_title(conn, ctx.id, payload.title, note_id)
-    await repo.replace_note_links(conn, ctx.id, note_id, repo.extract_wiki_links(payload.content))
+    links = repo.extract_wiki_links(payload.content)
+    await repo.replace_note_links(conn, ctx.id, note_id, links)
+
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="note.create",
+        target_type="note",
+        target_id=note_id,
+        target_label=payload.title,
+        detail={
+            "title": payload.title,
+            "link_count": len(links),
+            "collection_id": payload.collection_id,
+        },
+    )
 
     job_id = await conn.fetchval(
         """select public.enqueue_job(
@@ -249,10 +284,11 @@ async def update_note(
     # add or remove this note's own. Only re-resolve when one of them moved.
     if payload.title is not None:
         await repo.reindex_backlinks_to_title(conn, ctx.id, payload.title, note_id)
+    new_links: list[str] = []
     if payload.content is not None:
-        await repo.replace_note_links(
-            conn, ctx.id, note_id, repo.extract_wiki_links(payload.content)
-        )
+        titles = repo.extract_wiki_links(payload.content)
+        new_links = await _new_link_titles(conn, note_id, titles)
+        await repo.replace_note_links(conn, ctx.id, note_id, titles)
 
     # A content edit changes the searchable representation, so re-index.
     if payload.content is not None:
@@ -261,6 +297,35 @@ async def update_note(
                  p_workspace_id => $1, p_job_type => 'ingest_note', p_note_id => $2)""",
             ctx.id,
             note_id,
+        )
+
+    # `patch` rather than the payload: it holds only the fields the caller
+    # actually sent, so the trail records what changed instead of a wall of
+    # nulls. Titles go in as before/after because that pair is what answers
+    # "who renamed this?".
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="note.update",
+        target_type="note",
+        target_id=note_id,
+        target_label=patch.get("title") or existing["title"],
+        detail={
+            "fields_changed": ",".join(sorted(patch)),
+            "title_before": existing["title"],
+            "title_after": patch.get("title", existing["title"]),
+        },
+    )
+
+    if new_links:
+        await audit.record(
+            conn,
+            workspace_id=ctx.id,
+            action="note.link.create",
+            target_type="note",
+            target_id=note_id,
+            target_label=patch.get("title") or existing["title"],
+            detail={"link_count": len(new_links), "title": ",".join(new_links)},
         )
 
     return _summary(record, await repo.tag_names(conn, workspace_id=ctx.id, note_id=note_id))
@@ -286,8 +351,22 @@ async def delete_note(
     the schema had a `deleted_at` column.
     """
     tenancy.require_write(ctx)
-    if not await repo.soft_delete_note(conn, note_id, ctx.id):
+    # Read the title first: after the soft delete the row is still readable, but
+    # the audit label has to survive the eventual hard purge, which it does
+    # because `target_label` is a copy rather than a reference.
+    existing = await repo.get_note(conn, note_id, ctx.id)
+    if existing is None or not await repo.soft_delete_note(conn, note_id, ctx.id):
         raise NotFound("Note not found")
+
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="note.delete",
+        target_type="note",
+        target_id=note_id,
+        target_label=existing["title"],
+        detail={"title": existing["title"], "reason": "moved to trash"},
+    )
 
     retention_days = settings.trash_retention_days
     if retention_days > 0:

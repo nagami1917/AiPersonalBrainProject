@@ -198,6 +198,45 @@ fly secrets set \
 
 ---
 
+## 5a. Branches, issues and milestones
+
+**Milestones** are the M0-M9 set in `docs/ROADMAP.md`. That file is the authority;
+the GitHub milestones mirror it. The numbering is not arbitrary — M1-M4 had to
+land in that order because each one's "Done when" line depends on the previous,
+which is why renumbering to match a generic feature list would lose information.
+
+**Issues** carry at least one area label so they can be filtered:
+
+| Label | Area |
+|---|---|
+| `frontend` | SvelteKit work |
+| `backend` | FastAPI work |
+| `database` | PostgreSQL / Supabase, migrations, RLS |
+| `ai` | retrieval, prompting, providers |
+| `security` | anything with a trust boundary |
+| `devops` | deployment, CI, operations |
+| `documentation` | docs only |
+
+plus the GitHub defaults `bug` and `enhancement`.
+
+**Branches** follow `<type>/<slug>`, matching the commit type they will contain:
+
+```
+feature/<slug>     new capability
+fix/<slug>         a defect, including RLS and processing bugs
+security/<slug>    a change whose motivation is a vulnerability
+chore/<slug>       tooling and dependencies
+```
+
+`fix/rls-workspace-isolation` is the shape to copy: the type says what kind of
+change it is, and the slug says which invariant it touches. A branch whose name
+promises a security fix should contain a test that fails without it — the same
+discrimination standard `CONTRIBUTING`-style rules usually only gesture at.
+
+Note that `develop` is **not** used. This repository deploys from `main` with a
+short-lived branch per change, and an integration branch in between would mean
+the thing CI builds is not the thing that ships.
+
 ## 6. CI
 
 ```mermaid

@@ -6,7 +6,7 @@ import asyncpg
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 
-from app.core import tenancy
+from app.core import audit, tenancy
 from app.core.deps import UserConn, WorkspaceCtx
 from app.core.errors import Conflict, NotFound, Unprocessable
 
@@ -114,6 +114,16 @@ async def create_collection(
             "A collection with that name already exists at this level",
             code="duplicate_collection",
         ) from exc
+
+    await audit.record(
+        conn,
+        workspace_id=ctx.id,
+        action="collection.create",
+        target_type="collection",
+        target_id=str(record["id"]),
+        target_label=record["name"],
+        detail={"title": record["name"], "parent_id": payload.parent_id},
+    )
     return _row(record)
 
 

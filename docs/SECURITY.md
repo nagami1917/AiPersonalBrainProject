@@ -201,7 +201,15 @@ Migration `0013_audit_events.sql`, written by `app/core/audit.py`, readable at
 `GET /api/v1/workspaces/{id}/audit`.
 
 **Recorded:** document upload / delete / reprocess / download, workspace delete, member add /
-remove / leave / role change.
+remove / leave / role change, note create / update / delete, collection create, and
+`note.link.create` for a **newly** created wiki link.
+
+Notes and links were the last gap here, and the more damaging half of it: a document's
+bytes are immutable once uploaded, whereas a note's body is editable, so an unanswered
+"who changed this?" matters more there than anywhere else. `note.link.create` records the
+*delta* rather than the link set, because `replace_note_links` rewrites every outgoing link
+on each save — recording the whole set would emit an identical event on every autosave and
+train a reader to ignore the trail.
 
 **Properties that make it evidence rather than logging:**
 
