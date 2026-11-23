@@ -22,7 +22,10 @@ else
 fi
 
 echo "==> frontend: unit tests"
-(cd apps/web && npm run test --silent)
+# `svelte-kit sync` first: the app's tsconfig extends .svelte-kit/tsconfig.json,
+# which only exists after a sync. A fresh clone (and CI) has neither, and the
+# failure is a confusing "Cannot find module" rather than a test result.
+(cd apps/web && npx svelte-kit sync && npm run test --silent)
 
 echo "==> frontend: svelte-check"
 (cd apps/web && npm run check)
@@ -39,6 +42,8 @@ echo "==> deployment: environment configuration"
     DATABASE_URL=postgresql://u:p@h/db OPENAI_API_KEY=x \
     CORS_ALLOWED_ORIGINS=https://app.example \
     PUBLIC_SUPABASE_URL=https://example.supabase.co PUBLIC_SUPABASE_ANON_KEY=x \
+    API_BASE_URL=https://nexus-api.fly.dev \
+    SKIP_DB_CHECK=1 \
     ./scripts/check-env.sh >/dev/null ) \
   && echo "check-env.sh accepts a valid configuration" \
   || { echo "check-env.sh rejected a valid configuration"; exit 1; }

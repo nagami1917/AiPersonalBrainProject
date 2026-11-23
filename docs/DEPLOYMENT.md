@@ -111,7 +111,18 @@ Vercel otherwise fails at boot and looks like an outage rather than a typo.
 | `EMBEDDING_MODEL` | `PINNED_EMBEDDING_MODEL` | `Settings` model validator |
 | `ALLOWED_ORIGINS` | `CORS_ALLOWED_ORIGINS` | `Settings` model validator |
 | `MAX_UPLOAD_SIZE_MB` | `MAX_UPLOAD_BYTES` | `Settings` model validator |
-| `API_BASE_URL` | `PUBLIC_API_BASE_URL` | dev proxy only — see §3.2 |
+
+`API_BASE_URL` and `PUBLIC_API_BASE_URL` are **not** aliases of each other, and
+this table used to say they were. They answer different questions:
+
+| Variable | Question it answers | Visible to |
+|---|---|---|
+| `PUBLIC_API_BASE_URL` | what origin should the *browser* send `/v1/...` to? | the browser (it is `PUBLIC_`) |
+| `API_BASE_URL` | where should the *server* forward `/api/v1/...`? | the Vercel function only |
+
+Empty `PUBLIC_API_BASE_URL` plus a set `API_BASE_URL` is the default same-origin
+shape (§3.1). A set `PUBLIC_API_BASE_URL` means the browser bypasses the proxy
+entirely (§3.2).
 
 `tests/unit/test_config_aliases.py` pins that a spec-only environment boots, that
 the canonical name wins when both are set, and that an alias cannot introduce an
@@ -126,22 +137,45 @@ Two supported shapes. The default is the one that cannot be misconfigured.
 ### 3.1 Same origin (default)
 
 `PUBLIC_API_BASE_URL` is **empty**. The client calls `/api/v1/...` on whatever
-origin served the page:
+origin served the page, and one route forwards it to FastAPI:
 
-- **Development** — `vite.config.ts` proxies `/api/v1/*` to
-  `http://127.0.0.1:8000`, stripping the `/api` segment so FastAPI receives
-  `/v1/*`. No CORS preflight is involved at all.
-- **Production** — a reverse proxy on the same domain forwards `/api/v1/*` to
-  Fly. With no proxy, use §3.2 instead.
+```
+src/routes/api/v1/[...path]/+server.ts     /api/v1/* → {API_BASE_URL}/v1/*
+```
+
+That route runs under `vite dev` **and** as a Vercel function, so development and
+production use the same code path. Set `API_BASE_URL` to the FastAPI origin in
+both:
+
+| Environment | `API_BASE_URL` |
+|---|---|
+| Local | `http://127.0.0.1:8000` (the default when unset outside production) |
+| Vercel | `https://nexus-api.fly.dev` — server-only, never `PUBLIC_` |
 
 Why this is the default: a relative path is the only configuration that is
-correct in *both* environments. The tempting `API_BASE_URL=http://localhost:8000`
-works on the developer's laptop and fails for every real user, because their
-browser cannot reach the developer's `localhost`. `scripts/check-env.sh` fails a
-production deploy that sets a localhost API URL.
+correct in *both* environments. The tempting `http://localhost:8000` works on the
+developer's laptop and fails for every real user, because their browser cannot
+reach the developer's `localhost`. `scripts/check-env.sh` fails a production
+deploy that sets a localhost API URL.
 
-> The dev proxy is a convenience, not a requirement: the app also works with an
-> absolute base URL, so a static host with no proxy is fine.
+Rules the route follows, so the proxy cannot become a hole in the architecture:
+
+- It forwards `Authorization` untouched and **does not validate tokens**. FastAPI
+  remains the only verifier; a proxy that also checked JWTs would be a second,
+  weaker copy of the security boundary.
+- It never touches Postgres and holds no service-role key, so it cannot bypass
+  RLS on the way through.
+- It relays the SSE body as a stream. A buffering proxy turns a token-by-token
+  answer into one late blob that reads as a hang.
+- In production with no `API_BASE_URL` it returns **503
+  `api_upstream_not_configured`** with the fix in the message, rather than
+  attempting `127.0.0.1` from a server where that can only fail as
+  `ECONNREFUSED`.
+
+> Worth knowing: this proxy *is* a genuinely new hop — request bytes traverse a
+> Vercel function before reaching Fly. If that latency matters, use §3.2, where
+> the browser calls FastAPI directly. Both shapes are supported; only the
+> configuration differs.
 
 ### 3.2 Separate origin (absolute URL)
 
@@ -225,7 +259,15 @@ build blank:
 |---|---|
 | `PUBLIC_SUPABASE_URL` | project URL |
 | `PUBLIC_SUPABASE_ANON_KEY` | anon key |
-| `PUBLIC_API_BASE_URL` | `https://nexus-api.fly.dev`, or empty for same-origin |
+| `PUBLIC_API_BASE_URL` | empty for the same-origin shape (§3.1), or `https://nexus-api.fly.dev` for §3.2 |
+| `API_BASE_URL` | **`https://nexus-api.fly.dev`** — server-only upstream for the same-origin route |
+
+The two API variables are not alternatives to each other. `PUBLIC_API_BASE_URL`
+tells the *browser* where to send requests; `API_BASE_URL` tells the *Vercel
+function* where to forward them. Setting only the first works (§3.2). Setting
+only the second is the same-origin shape, which is the default. Setting neither
+leaves a deployed app that cannot reach its API — and in production the proxy
+says exactly that with a 503 instead of failing obscurely.
 
 A service-role key, AI key, or `DATABASE_URL` in Vercel is a **security bug**, not
 a configuration choice. `src/lib/utils/env.ts` reads only `PUBLIC_*` names, so

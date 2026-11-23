@@ -522,7 +522,26 @@ returns table (
 | 9 | A viewer cannot write, anywhere | `can_write_workspace` in every write policy | `tenancy.sql`, HTTP test |
 | 10 | A non-member sees a `404`, not a `403` | `resolve_workspace()` | HTTP test |
 | 11 | Re-indexing is version-guarded | `version` + supersede path | `workers/ingest.py` |
-| 12 | `embedding_dim()` is 1536 everywhere | `assert_embedding_dim()` | schema validation |
+| 12 | `embedding_dim()` is 1536 everywhere | `assert_embedding_dim()` | **boot guard** — `app/core/schema_guard.py` |
+
+### Why invariant 12 is checked at boot, not at insert
+
+`document_chunks.embedding` is `vector(1536)`, pinned by migration 0003 because
+the HNSW index is built for one width and cannot be rebuilt per request.
+`app/core/config.py` validates that the configured *model* matches its declared
+*dimension* — a table of known models — but it cannot see the *column*.
+
+So `EMBEDDING_MODEL=text-embedding-3-large` (3072 dims) passed every settings
+check, booted cleanly, and then failed on the first chunk insert, after the
+upload had been accepted and the job queued. The worker retried, which labelled a
+permanent schema mismatch as a temporary one.
+
+`assert_embedding_dim()` shipped in 0003 and was granted in 0011, and **nothing
+called it**. `verify_schema()` now calls it from the FastAPI lifespan, after the
+pool is created and before the first request, and compares the column against the
+configured width itself so the message names both values and the index to
+rebuild. `scripts/check-env.sh` performs the same comparison before a deploy,
+when a database is reachable.
 
 ---
 

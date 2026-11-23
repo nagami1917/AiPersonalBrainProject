@@ -112,8 +112,8 @@ describe('what a browser actually requests', () => {
     expect(url('', '/v1/workspaces/x/notes')).toBe('/api/v1/workspaces/x/notes');
   });
 
-  it('produces the same target through the dev proxy', () => {
-    // The relative request above is rewritten by the vite proxy to the upstream
+  it('produces the same target through the proxy route', () => {
+    // The relative request above is rewritten by the proxy route to the upstream
     // path, which is what an absolute base hits directly. Same endpoint, so
     // switching between the two configurations cannot change behaviour.
     const relative = url('', '/v1/workspaces/x/notes');

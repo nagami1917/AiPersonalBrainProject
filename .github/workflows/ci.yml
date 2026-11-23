@@ -1,0 +1,231 @@
+# CI gates, as specified in docs/DEVELOPMENT.md §6.
+#
+# Two jobs, deliberately separate:
+#
+#   * `checks` needs nothing but Python and Node. It is fast, and it is what a
+#     contributor sees first.
+#   * `database` runs the schema, RLS and retrieval suites against a real
+#     Postgres with pgvector. Those tests were being *skipped* locally whenever
+#     DATABASE_URL was unset, which meant the tenancy boundary — the one thing
+#     expensive to retrofit — had no gate at all.
+#
+# Both are blocking. `database` uses the `pgvector/pgvector` image rather than
+# the stock `postgres` one because migration 0003 declares `vector(1536)` and
+# creates an HNSW index; a stock image fails on migration 0001 and every later
+# test would be meaningless.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Tests must never reach a real provider or a real Supabase project.
+  ENVIRONMENT: test
+  SUPABASE_URL: http://127.0.0.1:54321
+  SUPABASE_ANON_KEY: test-anon
+  SUPABASE_SERVICE_ROLE_KEY: test-service
+  SUPABASE_JWT_SECRET: test-secret-with-at-least-32-characters-long
+  OPENAI_API_KEY: test-key
+  CI: "true"
+
+jobs:
+  checks:
+    name: lint · types · unit · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/api/requirements*.txt
+
+      - name: Install backend deps
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: ruff
+        working-directory: apps/api
+        run: |
+          ruff check app tests
+          ruff format --check app tests
+
+      - name: mypy
+        working-directory: apps/api
+        run: mypy app
+
+      - name: unit tests
+        working-directory: apps/api
+        run: pytest -q tests/unit
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: apps/web
+        run: npm ci
+
+      - name: frontend unit tests
+        working-directory: apps/web
+        # `svelte-kit sync` generates .svelte-kit/tsconfig.json, which the app's
+        # tsconfig.json extends. Vite reads it to transform the test files, so
+        # without this step a fresh checkout fails with "Cannot find module
+        # ./.svelte-kit/tsconfig.json" — invisible locally, where the directory
+        # already exists from `npm run dev`.
+        run: |
+          npx svelte-kit sync
+          npm run test -- --silent
+
+      - name: svelte-check
+        working-directory: apps/web
+        run: npm run check
+
+      - name: build
+        working-directory: apps/web
+        run: npm run build
+
+      - name: deployment env configuration
+        # Exercises the checker against a known-good set: a check that has never
+        # passed is as untrustworthy as one that has never failed. The database
+        # column comparison is skipped here (SKIP_DB_CHECK) because this job has
+        # no database; the `database` job runs it for real.
+        env:
+          SKIP_DB_CHECK: "1"
+        run: |
+          env -i PATH="$PATH" \
+            SUPABASE_URL=https://example.supabase.co SUPABASE_ANON_KEY=x \
+            SUPABASE_SERVICE_ROLE_KEY=x \
+            SUPABASE_JWT_SECRET=$(printf 'x%.0s' {1..40}) \
+            DATABASE_URL=postgresql://u:p@h/db OPENAI_API_KEY=x \
+            CORS_ALLOWED_ORIGINS=https://app.example \
+            PUBLIC_SUPABASE_URL=https://example.supabase.co \
+            PUBLIC_SUPABASE_ANON_KEY=x \
+            API_BASE_URL=https://nexus-api.fly.dev \
+            ./scripts/check-env.sh
+
+      - name: no secrets in the frontend bundle
+        # The build output is the one artifact that ships to a browser. A
+        # service-role key or AI key appearing here is a security bug, not a
+        # configuration choice (ARCHITECTURE.md §3).
+        working-directory: apps/web
+        run: |
+          if grep -rlE "SUPABASE_SERVICE_ROLE_KEY|OPENAI_API_KEY|AI_API_KEY|DATABASE_URL" \
+               .svelte-kit/output/client/ .vercel/output/static/ 2>/dev/null; then
+            echo "::error::a secret-like variable name appears in the client bundle"
+            exit 1
+          fi
+          echo "no secret-like names in the client bundle"
+
+  database:
+    name: migrations · RLS · retrieval
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # pgvector is required by migration 0003, not optional.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nexus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The API's own config requires these; they never leave the runner.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/nexus
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      # Without this, a `psql` without `-d` connects to the default `postgres`
+      # database while the migrations ran against `nexus`. The table-count
+      # assertion then reads the wrong database and fails for the wrong reason.
+      PGDATABASE: nexus
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/api/requirements*.txt
+
+      - name: Install backend deps
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Create the Supabase-equivalent surface
+        # Roles, the auth/storage schemas, auth.uid(), and pgcrypto's crypt() —
+        # everything Supabase provides that a bare Postgres does not, and that
+        # the migrations and seed depend on. Kept in the repository rather than
+        # inlined here: an inline copy silently drifts from what the seed needs,
+        # which is exactly how the `Seed` step failed on the first run of this
+        # workflow.
+        run: psql -v ON_ERROR_STOP=1 -d nexus -f supabase/tests/prelude.sql
+
+      - name: Apply migrations
+        # Every file, in order, failing the step on the first error. A migration
+        # that cannot run on this image is a real portability problem and should
+        # stop the build rather than be skipped — the only one that may be
+        # absent is `pg_trgm`'s extension, and it is present in this image.
+        run: |
+          set -euo pipefail
+          count=0
+          for f in supabase/migrations/*.sql; do
+            echo "→ $f"
+            psql -v ON_ERROR_STOP=1 -q -d nexus -f "$f"
+            count=$((count + 1))
+          done
+          expected=$(ls supabase/migrations/*.sql | wc -l)
+          if [ "$count" -ne "$expected" ]; then
+            echo "::error::applied $count of $expected migrations"
+            exit 1
+          fi
+          echo "applied all $count migrations"
+
+      - name: Assert no migration was skipped
+        # The suite is only meaningful if every migration ran. Comparing the
+        # file count against the recorded schema version catches a migration
+        # that silently did nothing.
+        run: |
+          applied=$(psql -d nexus -tAc "select count(*) from information_schema.tables
+                                        where table_schema = 'public' and table_type = 'BASE TABLE'")
+          echo "public tables: $applied"
+          if [ "$applied" -lt 15 ]; then
+            echo "::error::expected at least 15 public tables, found $applied — a migration did not run"
+            exit 1
+          fi
+
+      - name: Seed
+        run: psql -v ON_ERROR_STOP=1 -q -d nexus -f supabase/seed.sql
+
+      - name: Raw tenancy assertions
+        run: psql -v ON_ERROR_STOP=1 -q -d nexus -f supabase/tests/tenancy.sql
+
+      - name: database tests
+        working-directory: apps/api
+        run: pytest -q tests/db
