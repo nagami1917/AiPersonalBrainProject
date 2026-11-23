@@ -120,7 +120,17 @@ export type Citation = {
   quote: string;
   page: number | null;
   heading_path: string | null;
-  score: number;
+  /**
+   * Relative ordering strength: the best source in the answer is 1.0.
+   *
+   * NOT a probability. The raw value is a Reciprocal Rank Fusion score and an
+   * absolute judgement about relevance is made server-side before an answer is
+   * produced at all — if it failed, `grounded` is false and there are no
+   * citations. Never render this as a "% match".
+   */
+  relevance: number;
+  /** The unit of `relevance`. Travels with the number so a client cannot guess. */
+  relevance_kind: 'relative';
 };
 
 export async function streamChat(
@@ -181,4 +191,74 @@ export async function streamChat(
       onEvent({ type, ...data } as ChatEvent);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+// The assistant could start a conversation but never list, reopen or delete one,
+// so every reload lost the thread. The API already had all three endpoints; what
+// was missing was the client half.
+
+export type ConversationSummary = {
+  id: string;
+  title: string | null;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/** One citation attached to a stored assistant message. Mirrors `Citation`. */
+export type ReplayedCitation = {
+  marker: number;
+  chunk_id: string;
+  source_kind: 'note' | 'document';
+  source_id: string;
+  source_title: string;
+  filename: string | null;
+  quote: string;
+  page: number | null;
+  heading_path: string | null;
+  relevance: number;
+  relevance_kind: 'relative';
+};
+
+export type StoredMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  grounded: boolean | null;
+  citations: ReplayedCitation[];
+  created_at: string;
+};
+
+export async function listConversations(workspaceId: string): Promise<ConversationSummary[]> {
+  return apiFetch<ConversationSummary[]>(`/workspaces/${workspaceId}/conversations`);
+}
+
+export async function getConversation(
+  workspaceId: string,
+  conversationId: string
+): Promise<{ id: string; title: string | null; messages: StoredMessage[] }> {
+  return apiFetch(`/workspaces/${workspaceId}/conversations/${conversationId}`);
+}
+
+export async function renameConversation(
+  workspaceId: string,
+  conversationId: string,
+  title: string
+): Promise<void> {
+  await apiFetch(`/workspaces/${workspaceId}/conversations/${conversationId}`, {
+    method: 'PATCH',
+    body: { title }
+  });
+}
+
+export async function deleteConversation(
+  workspaceId: string,
+  conversationId: string
+): Promise<void> {
+  await apiFetch(`/workspaces/${workspaceId}/conversations/${conversationId}`, {
+    method: 'DELETE'
+  });
 }

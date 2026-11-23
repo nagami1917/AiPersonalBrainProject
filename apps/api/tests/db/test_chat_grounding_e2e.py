@@ -25,6 +25,8 @@ from app.core.security import AuthUser
 from app.schemas.chat import ChatRequest
 from app.services import chat_service
 
+from tests.db.support import rolled_back
+
 ALICE = "11111111-1111-1111-1111-111111111111"
 BOB = "22222222-2222-2222-2222-222222222222"
 
@@ -60,10 +62,19 @@ async def _session(pool: asyncpg.Pool, user_id: str) -> AsyncIterator[asyncpg.Co
     make the isolation assertions meaningless, because the policies would already
     have been evaluated under a different role.
     """
-    async with pool.acquire() as connection, connection.transaction():
-        await connection.execute("select set_config('role','authenticated',true)")
-        await connection.execute("select set_config('request.jwt.claim.sub',$1,true)", user_id)
-        yield connection
+    # `rolled_back`, not `async with connection.transaction()`: the latter
+    # commits on a clean exit, so this fixture was persisting every test's
+    # conversation and messages despite its docstring claiming otherwise.
+    #
+    # The transaction MUST start before the set_config calls: they pass
+    # is_local=true, which scopes them to the current transaction, and outside
+    # one they apply to their own statement only and evaporate. Getting this
+    # order wrong silently leaves the connection as its default superuser,
+    # RLS never applies, and the isolation tests pass for the wrong reason.
+    async with pool.acquire() as connection, rolled_back(connection) as tx:
+        await tx.execute("select set_config('role','authenticated',true)")
+        await tx.execute("select set_config('request.jwt.claim.sub',$1,true)", user_id)
+        yield tx
 
 
 @pytest.fixture
@@ -314,3 +325,272 @@ class TestWorkspaceIsolation:
 
         with pytest.raises(NotFound):
             await tenancy.resolve_workspace(conn, user_id=ALICE, workspace_id=str(uuid.uuid4()))
+
+
+class TestStreamingGrounding:
+    """The streaming path must obey the same grounding contract as `/chat`.
+
+    ## The bug these tests exist for
+
+    `stream_answer` yielded every model delta directly to the client and only
+    resolved citations afterwards:
+
+        async for delta in llm.stream(...):
+            yield ("delta", {"text": delta})        # already on the user's screen
+        answer = resolve_citations("".join(buffer), sources)   # too late
+
+    Observed against the seeded corpus, with a model that invents a marker:
+
+        USER SAW: "The service role key is in Fly secrets [9]. I couldn't find
+                   anything in your knowledge base about that. …"
+
+    Two contradictory statements in one bubble. The persisted message was the
+    refusal (correct), so the database and the screen disagreed — and the screen
+    is what the user reads. An answer with no marker at all was never retracted,
+    because there was no complete marker to notice.
+
+    `/chat/stream` is the path the UI uses, so this was the common case, not an
+    edge one.
+
+    ## What is asserted
+
+    The user-visible text is what matters, so these tests collect the `delta`
+    events and assert on the concatenation — not on the citations payload, which
+    was already correct while the stream was not.
+    """
+
+    class _FabricatingLLM:
+        """A model that invents a citation id it was never given."""
+
+        model = "test-llm"
+
+        def __init__(self, reply: str) -> None:
+            self.reply = reply
+            self.calls: list[tuple[str, str]] = []
+
+        async def complete(self, system: str, user: str) -> str:
+            self.calls.append((system, user))
+            return self.reply
+
+        async def stream(self, system: str, user: str):  # type: ignore[no-untyped-def]
+            self.calls.append((system, user))
+            for token in self.reply.split(" "):
+                yield token + " "
+
+    @staticmethod
+    async def _run(conn, workspace_id: str, question: str, reply: str, embedder):
+        llm = TestStreamingGrounding._FabricatingLLM(reply)
+        shown: list[str] = []
+        citations: dict | None = None
+        async for event, data in chat_service.stream_answer(
+            conn,
+            workspace_id=workspace_id,
+            user_id=ALICE,
+            request=ChatRequest(message=question),
+            embedder=embedder,
+            llm=llm,
+            settings=get_settings(),
+        ):
+            if event == "delta":
+                shown.append(data["text"])
+            elif event == "citations":
+                citations = data
+        return "".join(shown), citations, llm
+
+    async def test_a_fabricated_citation_never_reaches_the_user(self, conn, embedder):
+        workspace_id = await _personal_workspace(conn, ALICE)
+        shown, citations, _ = await self._run(
+            conn,
+            workspace_id,
+            "Where is the Supabase service role key stored?",
+            "The service role key is in Fly secrets [9].",
+            embedder,
+        )
+        assert citations is not None and citations["grounded"] is False
+        assert citations["citations"] == []
+        assert "[9]" not in shown, "a fabricated marker must never be displayed"
+        assert "Fly secrets" not in shown, (
+            "unverified model text must not be shown at all; before the fix the user "
+            "read the fabrication and the refusal in the same bubble"
+        )
+
+    async def test_an_answer_without_any_citation_never_reaches_the_user(self, conn, embedder):
+        """The case a post-hoc marker check cannot catch: there is nothing to retract."""
+        workspace_id = await _personal_workspace(conn, ALICE)
+        shown, citations, _ = await self._run(
+            conn,
+            workspace_id,
+            "Where is the Supabase service role key stored?",
+            "The service role key is in Fly secrets.",
+            embedder,
+        )
+        assert citations is not None and citations["grounded"] is False
+        assert "Fly secrets" not in shown
+
+    async def test_a_grounded_answer_still_streams(self, conn, embedder):
+        """The gate must not defeat streaming for the normal case."""
+        workspace_id = await _personal_workspace(conn, ALICE)
+        shown, citations, _ = await self._run(
+            conn,
+            workspace_id,
+            "Where is the Supabase service role key stored?",
+            "The service role key is stored in Fly secrets [1].",
+            embedder,
+        )
+        assert citations is not None
+        assert citations["grounded"] is True, "the fake model cited a real source"
+        assert "Fly secrets" in shown, "a grounded answer must reach the user"
+        assert len(citations["citations"]) == 1
+
+    async def test_the_persisted_message_matches_what_was_shown(self, conn, embedder):
+        """Screen and database must agree — the original bug made them disagree."""
+        workspace_id = await _personal_workspace(conn, ALICE)
+        shown, citations, _ = await self._run(
+            conn,
+            workspace_id,
+            "Where is the Supabase service role key stored?",
+            "The service role key is in Fly secrets [9].",
+            embedder,
+        )
+        # The assistant row, not the user's question — both live in chat_messages
+        # and "most recent" picks whichever was written last.
+        stored = await conn.fetchval(
+            """
+            select content from public.chat_messages
+             where role = 'assistant'
+             order by created_at desc limit 1
+            """
+        )
+        assert (
+            stored.strip() == shown.strip()
+        ), f"the user saw {shown!r} but the conversation stored {stored!r}"
+
+
+class TestConversationTitles:
+    """Conversations must arrive with a title, not a NULL.
+
+    Nothing used to write `conversations.title`, so the list endpoint returned a
+    column of `null` and the history was unnavigable. Set at creation from the
+    opening question so an abandoned first turn is still findable.
+    """
+
+    async def test_a_new_conversation_is_titled_from_its_first_question(self, conn, embedder, llm):
+        workspace_id = await _personal_workspace(conn, ALICE)
+        llm.reply = "Retrieval uses RRF [1]."
+        message_id, conversation_id, _ = await chat_service.answer(
+            conn,
+            workspace_id=workspace_id,
+            user_id=ALICE,
+            request=ChatRequest(message="What did I decide about retrieval scoring?"),
+            embedder=embedder,
+            llm=llm,
+            settings=get_settings(),
+        )
+        title = await conn.fetchval(
+            "select title from public.conversations where id=$1", conversation_id
+        )
+        assert title == "What did I decide about retrieval scoring?"
+
+    async def test_a_greeting_still_produces_a_listable_conversation(self, conn, embedder, llm):
+        workspace_id = await _personal_workspace(conn, ALICE)
+        _, conversation_id, _ = await chat_service.answer(
+            conn,
+            workspace_id=workspace_id,
+            user_id=ALICE,
+            request=ChatRequest(message="hi"),
+            embedder=embedder,
+            llm=llm,
+            settings=get_settings(),
+        )
+        title = await conn.fetchval(
+            "select title from public.conversations where id=$1", conversation_id
+        )
+        assert title == "New conversation", "a greeting must not leave the row untitled"
+
+    async def test_a_follow_up_turn_does_not_retitle_the_conversation(self, conn, embedder, llm):
+        """The title is the opening question, not the most recent one."""
+        workspace_id = await _personal_workspace(conn, ALICE)
+        _, conversation_id, _ = await chat_service.answer(
+            conn,
+            workspace_id=workspace_id,
+            user_id=ALICE,
+            request=ChatRequest(message="What did I decide about retrieval scoring?"),
+            embedder=embedder,
+            llm=llm,
+            settings=get_settings(),
+        )
+        await chat_service.answer(
+            conn,
+            workspace_id=workspace_id,
+            user_id=ALICE,
+            request=ChatRequest(
+                message="And what about the job queue?", conversation_id=conversation_id
+            ),
+            embedder=embedder,
+            llm=llm,
+            settings=get_settings(),
+        )
+        title = await conn.fetchval(
+            "select title from public.conversations where id=$1", conversation_id
+        )
+        assert title == "What did I decide about retrieval scoring?"
+
+
+class TestCitationRelevance:
+    """Citations must carry a usable relevance value, not a raw RRF score.
+
+    RRF values are ~0.008–0.03, so the UI's `score * 100` rendered every source as
+    "1% match" — including the best one. The number was real and the label was a
+    fabrication, which is worse than no number.
+    """
+
+    async def test_the_best_citation_has_full_relative_relevance(self, conn, embedder):
+        workspace_id = await _personal_workspace(conn, ALICE)
+        from app.services.retrieval_service import retrieve
+
+        result = await retrieve(
+            conn,
+            workspace_id=workspace_id,
+            query="Supabase service role key Fly secrets",
+            embedder=embedder,
+            settings=get_settings(),
+            match_count=5,
+        )
+        assert result.sources, "the seeded corpus should answer this"
+
+        from app.ai.rag.answer_generator import resolve_citations
+
+        # Cite every source so the normalisation sees the whole set.
+        answer = resolve_citations(
+            " ".join(f"[{s.marker}]" for s in result.sources), result.sources
+        )
+        assert answer.citations
+        import math
+
+        assert math.isclose(
+            max(c.relevance for c in answer.citations), 1.0
+        ), "the best source must normalise to 1.0, not to its raw 0.01 RRF value"
+        assert all(0.0 <= c.relevance <= 1.0 for c in answer.citations)
+        assert all(c.relevance_kind == "relative" for c in answer.citations)
+
+    async def test_relevance_is_not_the_raw_fused_score(self, conn, embedder):
+        """Guards the regression explicitly: the old value was ~0.01 for everything."""
+        workspace_id = await _personal_workspace(conn, ALICE)
+        from app.services.retrieval_service import retrieve
+
+        result = await retrieve(
+            conn,
+            workspace_id=workspace_id,
+            query="Supabase service role key Fly secrets",
+            embedder=embedder,
+            settings=get_settings(),
+            match_count=5,
+        )
+        from app.ai.rag.answer_generator import resolve_citations
+
+        answer = resolve_citations(
+            " ".join(f"[{s.marker}]" for s in result.sources), result.sources
+        )
+        assert (
+            max(c.relevance for c in answer.citations) > 0.5
+        ), "raw RRF scores are ~0.01; a citation reporting 0.01 is the bug this guards"

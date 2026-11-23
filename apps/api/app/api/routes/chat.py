@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.ai.providers import LLM, Embedder
 from app.ai.rag import GroundedAnswer
+from app.ai.retrieval.reranker import normalize_scores
 from app.core import guard
 from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, UserConn, WorkspaceCtx, get_embedder, get_llm
@@ -23,21 +24,13 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/chat", tags=["chat"])
 
 
 def _citations(answer: GroundedAnswer) -> list[CitationOut]:
-    return [
-        CitationOut(
-            marker=c.marker,
-            chunk_id=c.chunk_id,
-            source_kind=c.source_kind,  # type: ignore[arg-type]
-            source_id=c.document_id,
-            source_title=c.document_title,
-            filename=c.source_filename,
-            quote=c.quote,
-            page=c.page,
-            heading_path=c.heading_path,
-            score=c.score,
-        )
-        for c in answer.citations
-    ]
+    """Delegate to the one citation→schema mapping.
+
+    This used to be a second copy of `chat_service._to_out`, which is exactly the
+    kind of duplication that goes wrong quietly: the citation contract changed
+    and only one copy would have been updated.
+    """
+    return [chat_service.to_citation_out(c) for c in answer.citations]
 
 
 @router.post("", response_model=ChatResponse)
@@ -212,8 +205,24 @@ async def get_conversation(
         [m["id"] for m in messages],
     )
 
+    # Normalise per MESSAGE, not across the conversation: each answer's citations
+    # are relative to the best source for that answer, exactly as when it streamed.
+    per_message_scores: dict[str, list[float]] = {}
+    for src in sources:
+        per_message_scores.setdefault(str(src["message_id"]), []).append(
+            float(src["relevance_score"] or 0.0)
+        )
+    normalised: dict[str, list[float]] = {
+        message_id: normalize_scores(scores) for message_id, scores in per_message_scores.items()
+    }
+    seen_markers: dict[str, int] = {}
+
     by_message: dict[str, list[dict[str, Any]]] = {}
     for src in sources:
+        message_key = str(src["message_id"])
+        index = seen_markers.get(message_key, 0)
+        seen_markers[message_key] = index + 1
+        relevance = normalised[message_key][index]
         by_message.setdefault(str(src["message_id"]), []).append(
             {
                 "marker": src["marker"],
@@ -224,7 +233,12 @@ async def get_conversation(
                 "quote": src["quote"],
                 "page": src["page"],
                 "heading_path": src["heading_path"],
-                "score": src["relevance_score"],
+                # Same rescaling as a live answer. The stored value is what was
+                # persisted and it is also an RRF value (~0.01), so replaying it
+                # raw would show "1% match" on reload — a bug that only appears
+                # after the page is refreshed is the kind that survives review.
+                "relevance": relevance,
+                "relevance_kind": "relative",
             }
         )
 

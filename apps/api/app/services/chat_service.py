@@ -21,12 +21,14 @@ from typing import Any
 
 import asyncpg
 
+from app.ai.conversation_title import derive_title
 from app.ai.providers import LLM, Embedder
 from app.ai.rag import (
     REFUSAL_TEMPLATE,
     SYSTEM_PROMPT,
     Citation,
     GroundedAnswer,
+    GroundingStreamFilter,
     build_user_turn,
     resolve_citations,
     should_refuse,
@@ -40,7 +42,12 @@ log = logging.getLogger(__name__)
 
 
 async def _ensure_conversation(
-    conn: asyncpg.Connection, *, workspace_id: str, user_id: str, conversation_id: str | None
+    conn: asyncpg.Connection,
+    *,
+    workspace_id: str,
+    user_id: str,
+    conversation_id: str | None,
+    title_source: str | None = None,
 ) -> str:
     if conversation_id:
         existing = await conn.fetchval(
@@ -52,12 +59,18 @@ async def _ensure_conversation(
             raise NotFound("Conversation not found")
         return str(existing)
 
+    # The title is set at creation from the opening question. Doing it here
+    # rather than in a follow-up UPDATE matters: a conversation that never gets
+    # a second turn would otherwise stay untitled forever, which is exactly the
+    # abandoned conversations that make a sidebar useless.
+    title = derive_title(title_source or "")
     return str(
         await conn.fetchval(
-            """insert into public.conversations (workspace_id, created_by)
-               values ($1,$2) returning id""",
+            """insert into public.conversations (workspace_id, created_by, title)
+               values ($1,$2,$3) returning id""",
             workspace_id,
             user_id,
+            title,
         )
     )
 
@@ -133,7 +146,7 @@ async def _persist_assistant_message(
             citation.quote,
             citation.page,
             citation.heading_path,
-            citation.score,
+            citation.relevance,
         )
 
     if answer.fabricated_markers:
@@ -149,7 +162,7 @@ async def _persist_assistant_message(
     return str(message_id)
 
 
-def _to_out(citation: Citation) -> CitationOut:
+def to_citation_out(citation: Citation) -> CitationOut:
     return CitationOut(
         marker=citation.marker,
         chunk_id=citation.chunk_id,
@@ -160,7 +173,8 @@ def _to_out(citation: Citation) -> CitationOut:
         quote=citation.quote,
         page=citation.page,
         heading_path=citation.heading_path,
-        score=citation.score,
+        relevance=citation.relevance,
+        relevance_kind=citation.relevance_kind,  # type: ignore[arg-type]
     )
 
 
@@ -180,6 +194,7 @@ async def answer(
         workspace_id=workspace_id,
         user_id=user_id,
         conversation_id=request.conversation_id,
+        title_source=request.message,
     )
     await _persist_user_message(
         conn, workspace_id=workspace_id, conversation_id=conversation_id, content=request.message
@@ -248,6 +263,7 @@ async def stream_answer(
         workspace_id=workspace_id,
         user_id=user_id,
         conversation_id=request.conversation_id,
+        title_source=request.message,
     )
     await _persist_user_message(
         conn, workspace_id=workspace_id, conversation_id=conversation_id, content=request.message
@@ -307,12 +323,42 @@ async def stream_answer(
         return
 
     user_turn = build_user_turn(request.message, result.sources, history)
+
+    # Nothing is released to the user until a real citation exists — see
+    # `ai/rag/stream_guard.py` for why streaming unverified text and retracting
+    # it afterwards is not a defence.
+    gate = GroundingStreamFilter(s.marker for s in result.sources)
     buffer: list[str] = []
     async for delta in llm.stream(SYSTEM_PROMPT, user_turn):
         buffer.append(delta)
-        yield ("delta", {"text": delta})
+        safe = gate.feed(delta)
+        if safe:
+            yield ("delta", {"text": safe})
+
+    tail = gate.flush()
+    if tail:
+        yield ("delta", {"text": tail})
 
     answer_obj = resolve_citations("".join(buffer), result.sources)
+
+    if not gate.grounded:
+        # The model produced no valid citation. Because the gate held everything
+        # back, the browser has shown nothing — so emitting the refusal now is a
+        # correct substitution rather than a contradiction of what was already
+        # on screen.
+        log.warning(
+            "stream_ungrounded conversation=%s fabricated=%s chars_withheld=%d",
+            conversation_id,
+            answer_obj.fabricated_markers,
+            len("".join(buffer)),
+        )
+        answer_obj = GroundedAnswer(
+            content=REFUSAL_TEMPLATE,
+            grounded=False,
+            fabricated_markers=answer_obj.fabricated_markers,
+        )
+        yield ("delta", {"text": REFUSAL_TEMPLATE})
+
     latency = int((time.perf_counter() - started) * 1000)
 
     # Persist the RESOLVED content: fabricated markers never reach history.
@@ -328,7 +374,9 @@ async def stream_answer(
     yield (
         "citations",
         {
-            "citations": [json.loads(_to_out(c).model_dump_json()) for c in answer_obj.citations],
+            "citations": [
+                json.loads(to_citation_out(c).model_dump_json()) for c in answer_obj.citations
+            ],
             "grounded": answer_obj.grounded,
         },
     )

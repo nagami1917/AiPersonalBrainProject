@@ -56,16 +56,28 @@ class ChatRequest(BaseModel):
 
 
 class CitationOut(BaseModel):
+    """The citation contract, one field per requirement in the spec.
+
+    `relevance` + `relevance_kind` replace the old `score` because the old field
+    published a raw RRF value (~0.01) that clients rendered as a percentage. The
+    kind is part of the payload so the unit travels with the number.
+    """
+
     marker: int
+    # --- identity: which chunk, in which document ---------------------------
     chunk_id: str
     source_kind: Literal["note", "document"]
     source_id: str
+    # --- human-readable naming, incl. page when the format has one ----------
     source_title: str
     filename: str | None = None
-    quote: str
     page: int | None = None
     heading_path: str | None = None
-    score: float
+    # --- the retrieved source content the claim rests on --------------------
+    quote: str
+    # --- relevance ----------------------------------------------------------
+    relevance: float
+    relevance_kind: Literal["relative"] = "relative"
 
 
 class ChatResponse(BaseModel):

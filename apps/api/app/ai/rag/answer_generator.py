@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.ai.rag.context_builder import Source
+from app.ai.retrieval.reranker import normalize_scores
 
 MARKER_RE = re.compile(r"\[(\d{1,3})\]")
 
@@ -31,6 +32,22 @@ REFUSAL_TEMPLATE = (
 
 @dataclass
 class Citation:
+    """One cited passage, resolved against a real retrieved chunk.
+
+    ## What `relevance` means, and what it deliberately does not
+
+    `relevance` is the hit's fused RRF score rescaled so the best source in this
+    answer is 1.0. It is a **relative** ordering signal: those RRF values are
+    ~0.008–0.03, so publishing them raw made every citation render as "1%
+    match" while the engine thought the top hit was the best thing it had.
+
+    It is explicitly *not* a probability, and `relevance_kind` says so. The
+    absolute judgement about whether retrieval was good enough lives in
+    `should_refuse`, which uses cosine similarity — the one number that can
+    express "unrelated". A client that renders `relevance` as a percentage must
+    pair it with `relevance_kind` rather than implying confidence.
+    """
+
     marker: int
     chunk_id: str
     document_id: str
@@ -38,9 +55,13 @@ class Citation:
     quote: str
     page: int | None
     heading_path: str | None
-    score: float
+    relevance: float
     source_kind: str = "document"
     source_filename: str | None = None
+
+    # Constant, not per-row: every citation in one answer shares one scale.
+    # Serialised so a client cannot guess the scale wrong.
+    relevance_kind: str = "relative"
 
 
 @dataclass
@@ -75,6 +96,13 @@ def resolve_citations(
 ) -> GroundedAnswer:
     """Resolve markers to real sources; drop everything fabricated."""
     by_marker = {s.marker: s for s in sources}
+    # Rescale ONCE across the cited set, not per citation: normalising each
+    # against itself would make every relevance exactly 1.0, which is the same
+    # bug (a meaningless number presented as a measurement) in a new costume.
+    relevance_by_marker = {
+        source.marker: value
+        for source, value in zip(sources, normalize_scores([s.score for s in sources]), strict=True)
+    }
     seen: set[int] = set()
     fabricated: list[int] = []
     citations: list[Citation] = []
@@ -97,7 +125,7 @@ def resolve_citations(
                 quote=_quote_from(source.content, quote_chars),
                 page=source.page_number,
                 heading_path=source.heading_path,
-                score=round(source.score, 4),
+                relevance=relevance_by_marker.get(marker, 0.0),
                 source_kind=source.source_kind,
                 source_filename=source.source_filename,
             )

@@ -379,6 +379,12 @@ Server-controlled, never client-controlled: model id, temperature, token budget,
 
 Response includes `grounded`, `citations[]`, `retrieval_debug` (only when `?debug=1` and the caller owns the conversation).
 
+**Filters** (`filters` on search and chat): `collection_id`, `tag`, `created_after`, `created_before`,
+`source_ids`, `kind`. They are applied once inside `hybrid_search`, so both arms see the same
+candidate set. `tag` matches the parent's tag name case-insensitively; an unknown tag matches
+**nothing** rather than falling back to "no filter", so a typo cannot silently return the whole
+workspace.
+
 #### Conversations
 
 | Method | Path | Purpose |
@@ -390,10 +396,66 @@ Response includes `grounded`, `citations[]`, `retrieval_debug` (only when `?debu
 | `POST` | `…/messages/{id}/feedback` | `{helpful: bool, reason?}` — the cheapest source of eval material |
 
 Conversations are created implicitly by the first chat message; there is no empty-conversation
-endpoint. Each citation in the transcript carries `source_kind`, `source_title`, `filename`, `quote`,
-`page`, `heading_path` and `score`. `filename` is the uploaded file's name for document
-sources and the title for notes (which have no file), denormalised into `message_sources` at
-write time so a rename or delete cannot rewrite history.
+endpoint.
+
+A conversation is **titled at creation** from its opening question, so the history list is
+navigable without a second request (`GET …/conversations` returns it). A greeting or an empty
+question produces `"New conversation"` rather than a `null` title, because an untitled row cannot
+be found in a list. `PATCH` renames it; the title is never regenerated on a follow-up turn.
+
+#### The citation shape
+
+| Field | Meaning |
+|---|---|
+| `chunk_id` | The exact retrieved passage. The join key for everything else. |
+| `source_kind` / `source_id` | Which table the id belongs to (`note` or `document`). |
+| `source_title`, `filename`, `page`, `heading_path` | How a human recognises the source. `page` is `null` for formats without pages. |
+| `quote` | The retrieved content itself, so a citation can be checked without another request. |
+| `relevance` + `relevance_kind` | See below. |
+
+`relevance` is the hit's fused RRF score rescaled so the best source in that answer is `1.0`.
+It is a **relative ordering signal, not a confidence**, which is why the unit travels with it as
+`relevance_kind: "relative"`. The raw RRF value is ~0.008–0.03, and publishing it directly made
+every citation render as "1% match" — a fabricated measurement. The absolute judgement about
+whether retrieval was good enough happens server-side before generation (`grounded: false` and no
+citations at all), so a client should render `relevance` as a bar, never as a percentage.
+
+`filename` is the uploaded file's name for document sources and the title for notes (which have no
+file), denormalised into `message_sources` at write time so a rename or delete cannot rewrite
+history. Replayed citations are rescaled per message, so a refresh does not change what the
+numbers mean.
+
+#### Streaming and grounding
+
+`POST …/chat/stream` emits `sources` before generation, then `delta`s, then `citations`, then
+`done`. One rule is load-bearing: **no text is emitted until the model has cited a real source.**
+A model that invents `[9]`, or that answers without citing anything, produces no deltas at all —
+the client receives only the refusal. The alternative (stream unverified text, then report
+`grounded: false`) showed users the fabrication and then contradicted it in the same bubble, and
+left an uncited answer entirely unretracted. The cost is that a grounded answer's first chunk is
+released when its first valid citation arrives, not before.
+
+---
+
+### 3.6a Embedding model metadata and reprocessing
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `…/embeddings` | Chunk counts per embedding model vs. the configured one, plus how much work a reindex is |
+| `GET` | `…/embeddings/health` | One-line state: `empty` / `current` / `mixed` / `stale` |
+| `POST` | `…/embeddings/reindex` | Queue a `reindex` job per source whose vectors came from another model. Requires `{"confirm": true}` |
+
+Every chunk records `embedding_model` and `embedding_dim`. Changing the model is a migration, not a
+config tweak, because `document_chunks.embedding` is `vector(1536)` and the HNSW index is built for
+one width — `core/schema_guard.py` refuses to boot on a width mismatch. What it cannot catch is a
+swap at the *same* width, which leaves old vectors being ranked against new query vectors: cosine
+distance across two embedding spaces is meaningless, and results get quietly worse rather than
+failing. `state: "mixed"` is that condition, and it is why the API reports it and the worker logs
+drift at startup.
+
+`confirm` is required rather than defaulted to `false`, so a client that forgets it gets a `400`
+instead of assuming a reindex started. Queueing is idempotent per source: a source already
+pending is skipped, so the call can be retried safely.
 
 ---
 

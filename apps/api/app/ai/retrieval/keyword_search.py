@@ -51,5 +51,6 @@ async def keyword(
         created_before=filters.created_before,
         source_ids=filters.source_ids,
         kind=filters.kind,
+        tag=filters.tag,
     )
     return [row_to_hit(row) for row in rows]

@@ -27,7 +27,8 @@ select * from public.hybrid_search(
   p_created_before => $11,
   p_min_similarity => $12,
   p_source_ids     => $13,
-  p_kind           => $14
+  p_kind           => $14,
+  p_tag            => $15
 )
 """
 
@@ -49,6 +50,7 @@ async def hybrid(
     created_before: datetime | None = None,
     source_ids: list[str] | None = None,
     kind: str | None = None,
+    tag: str | None = None,
 ) -> list[asyncpg.Record]:
     vector_literal = "[" + ",".join(f"{v:.7f}" for v in embedding) + "]" if embedding else None
     rows: list[Any] = await conn.fetch(
@@ -67,5 +69,6 @@ async def hybrid(
         min_similarity,
         source_ids,
         kind,
+        tag,
     )
     return list(rows)

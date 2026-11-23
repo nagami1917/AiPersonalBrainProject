@@ -266,8 +266,8 @@ async def run_ingest(
                     f"""insert into public.document_chunks
                         (workspace_id, {parent_col}, chunk_index, content, token_count,
                          char_start, char_end, page_number, page_end, heading_path,
-                         embedding, embedding_model, version)
-                        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector,$12,$13)""",
+                         embedding, embedding_model, embedding_dim, version)
+                        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector,$12,$13,$14)""",
                     target.workspace_id,
                     target.id,
                     item.chunk.chunk_index,
@@ -280,6 +280,7 @@ async def run_ingest(
                     item.chunk.heading_path,
                     _vector_literal(item.embedding),
                     embedder.model,
+                    embedder.dim,
                     target.version,
                 )
 
@@ -287,7 +288,8 @@ async def run_ingest(
             # completed_at is set here and not when chunks were stored.
             assignments = (
                 "status='ready', processing_stage=null, error_message=null, "
-                "embedding_model=$2, page_count=coalesce($3, page_count)"
+                "embedding_model=$2, embedding_dim=$5, "
+                "page_count=coalesce($3, page_count)"
             )
             if target.kind == "document":
                 assignments += ", completed_at=now()"
@@ -299,6 +301,7 @@ async def run_ingest(
                 embedder.model,
                 target.page_count,
                 target.version,
+                embedder.dim,
             )
 
         # --- 6/7. summary, then concepts + relationships --------------------
