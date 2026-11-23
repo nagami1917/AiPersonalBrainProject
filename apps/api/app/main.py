@@ -30,7 +30,7 @@ from app.api.routes import (
     suggestions,
     workspaces,
 )
-from app.core.config import get_settings
+from app.core.config import API_PREFIX, get_settings
 from app.core.db import close_pool, get_pool
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging, install_request_logging
@@ -96,22 +96,22 @@ def create_app() -> FastAPI:
         auth,
         ai,
     ):
-        app.include_router(module.router, prefix="/v1")
-    app.include_router(collections.tags_router, prefix="/v1")
-    app.include_router(conversations.messages_router, prefix="/v1")
+        app.include_router(module.router, prefix=API_PREFIX)
+    app.include_router(collections.tags_router, prefix=API_PREFIX)
+    app.include_router(conversations.messages_router, prefix=API_PREFIX)
 
     # Flat, spec-shaped aliases. They resolve a workspace themselves (query
     # parameter, defaulting to the caller's own) and delegate to the scoped
     # handlers, so there is one implementation of each resource.
-    app.include_router(aliases.flat, prefix="/v1")
-    app.include_router(search.flat_router, prefix="/v1")
-    app.include_router(graph.flat_router, prefix="/v1")
+    app.include_router(aliases.flat, prefix=API_PREFIX)
+    app.include_router(search.flat_router, prefix=API_PREFIX)
+    app.include_router(graph.flat_router, prefix=API_PREFIX)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": settings.api_version}
 
-    @app.get("/v1/meta", tags=["meta"])
+    @app.get(f"{API_PREFIX}/meta", tags=["meta"])
     async def meta() -> dict[str, object]:
         """Capability document: the frontend reads limits from here instead of
         hardcoding them (API.md §3.1).

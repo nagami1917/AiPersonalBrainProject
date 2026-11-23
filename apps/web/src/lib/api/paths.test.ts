@@ -1,131 +1,136 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  API_NAMESPACE,
   API_PATH_PREFIX,
-  API_PREFIX,
-  API_VERSION_PREFIX,
-  joinOrigin,
+  API_VERSION,
+  apiPath,
   isApiPath,
+  joinOrigin,
   toUpstreamPath
 } from './paths';
 
 /**
- * These tests exist because getting the base URL wrong is invisible in the way
- * that costs the most: the app loads, the shell renders, and every data request
- * fails with a network error that looks like the backend is down.
+ * The API is versioned at `/api/v1`, defined once. These tests pin the two
+ * properties that make that single definition worth having:
  *
- * The three shapes that must all work:
+ *   1. Callers express resource paths; the prefix is applied for them.
+ *   2. Every shape of operator-supplied base URL joins without duplicating the
+ *      prefix.
  *
- *   relative       no base configured → `/api/v1/...` on this origin
- *   absolute       `https://api.host`  → joined directly
- *   spec's form    `https://host/api/v1` → prefix not duplicated
+ * They also pin the identity that `toUpstreamPath` now is. That is not a
+ * tautology worth testing for its own sake — it is the bug that used to exist
+ * (FastAPI at `/v1`, browser at `/api/v1`, a proxy translating) and the test
+ * exists so a future "clever" rewrite has to argue with it.
  */
+
 describe('API prefix', () => {
-  it('separates the browser segment from the versioned mount point', () => {
-    // Callers already build `/v1/...` paths, so the prefix must be `/api` alone.
-    // Folding the version in here produces `/api/v1/v1/notes`.
-    expect(API_PREFIX).toBe('/api');
-    expect(API_VERSION_PREFIX).toBe('/v1');
+  it('is built from a namespace and a version, defined once', () => {
+    expect(API_NAMESPACE).toBe('/api');
+    expect(API_VERSION).toBe('v1');
     expect(API_PATH_PREFIX).toBe('/api/v1');
+  });
+
+  it('composes rather than hardcoding the composed string', () => {
+    expect(API_PATH_PREFIX).toBe(`${API_NAMESPACE}/${API_VERSION}`);
+  });
+});
+
+describe('apiPath', () => {
+  it('prefixes a resource path', () => {
+    expect(apiPath('/workspaces/x/notes')).toBe('/api/v1/workspaces/x/notes');
+  });
+
+  it('tolerates a path without a leading slash', () => {
+    expect(apiPath('workspaces')).toBe('/api/v1/workspaces');
+  });
+
+  it('is idempotent, so a full path is never doubled', () => {
+    // The failure mode this prevents: /api/v1/api/v1/... and a 404 on every
+    // request. Callers sometimes pass a path that came back from the server.
+    const full = '/api/v1/notes';
+    expect(apiPath(full)).toBe(full);
+    expect(apiPath(apiPath('/notes'))).toBe('/api/v1/notes');
+  });
+
+  it('prefixes the bare root', () => {
+    expect(apiPath('/')).toBe('/api/v1/');
   });
 });
 
 describe('isApiPath', () => {
-  it('matches the prefix itself and anything beneath it', () => {
+  it('recognises the prefix and anything under it', () => {
     expect(isApiPath('/api/v1')).toBe(true);
     expect(isApiPath('/api/v1/notes')).toBe(true);
-    expect(isApiPath('/api/v1/workspaces/x/chat/stream')).toBe(true);
   });
 
   it('does not match a lookalike prefix', () => {
-    // `/api/v10` is not `/api/v1`; a bare startsWith would forward it upstream.
+    // /api/v10 is a different version and must not be treated as ours, and
+    // /apix is not ours at all. A bare startsWith would get both wrong.
     expect(isApiPath('/api/v10/notes')).toBe(false);
-    expect(isApiPath('/api/notes')).toBe(false);
+    expect(isApiPath('/apix')).toBe(false);
     expect(isApiPath('/notes')).toBe(false);
+    expect(isApiPath('/')).toBe(false);
   });
 });
 
 describe('toUpstreamPath', () => {
-  it('strips the public prefix, because FastAPI mounts at /v1', () => {
-    expect(toUpstreamPath('/api/v1/notes')).toBe('/v1/notes');
-    expect(toUpstreamPath('/api/v1/workspaces/abc/chat/stream')).toBe(
-      '/v1/workspaces/abc/chat/stream'
+  it('is the identity, because FastAPI also mounts at /api/v1', () => {
+    // The old design stripped /api here. Keeping a named function (rather than
+    // deleting it) documents that the translation is deliberate.
+    expect(toUpstreamPath('/api/v1/notes')).toBe('/api/v1/notes');
+    expect(toUpstreamPath('/api/v1/notes?limit=5&cursor=x')).toBe(
+      '/api/v1/notes?limit=5&cursor=x'
     );
   });
 
-  it('preserves a query string', () => {
-    expect(toUpstreamPath('/api/v1/notes?limit=5&cursor=x')).toBe('/v1/notes?limit=5&cursor=x');
-  });
-
-  it('leaves an already-upstream path alone', () => {
-    expect(toUpstreamPath('/v1/notes')).toBe('/v1/notes');
-  });
-
-  it('does not strip a lookalike prefix', () => {
-    expect(toUpstreamPath('/api/v10/notes')).toBe('/api/v10/notes');
+  it('returns a foreign path unchanged rather than guessing', () => {
+    expect(toUpstreamPath('/health')).toBe('/health');
   });
 });
 
 describe('joinOrigin', () => {
   it('joins a bare origin', () => {
-    expect(joinOrigin('https://api.example.com', '/v1/notes')).toBe(
-      'https://api.example.com/v1/notes'
+    expect(joinOrigin('https://api.example.com', '/api/v1/notes')).toBe(
+      'https://api.example.com/api/v1/notes'
     );
   });
 
-  it('joins an origin with a path prefix', () => {
-    expect(joinOrigin('https://example.com/backend', '/v1/notes')).toBe(
-      'https://example.com/backend/v1/notes'
+  it('collapses a base that already carries /api/v1', () => {
+    // The spec's API_BASE_URL form. Pasting it must not produce /api/v1/api/v1.
+    expect(joinOrigin('https://api.example.com/api/v1', '/api/v1/notes')).toBe(
+      'https://api.example.com/api/v1/notes'
     );
   });
 
-  it('does not duplicate the prefix when the base already ends with /api/v1', () => {
-    // The spec's `API_BASE_URL=http://localhost:8000/api/v1` form. Repeating the
-    // prefix here would produce `/api/v1/api/v1/notes` and a 404 on every call.
-    expect(joinOrigin('http://localhost:8000/api/v1', '/api/v1/notes')).toBe(
-      'http://localhost:8000/api/v1/notes'
+  it('collapses a base that carries only /api', () => {
+    expect(joinOrigin('https://api.example.com/api', '/api/v1/notes')).toBe(
+      'https://api.example.com/api/v1/notes'
     );
   });
 
-  it('tolerates a trailing slash on the origin', () => {
-    expect(joinOrigin('https://api.example.com/', '/v1/notes')).toBe(
-      'https://api.example.com/v1/notes'
-    );
-    expect(joinOrigin('https://api.example.com///', '/v1/notes')).toBe(
-      'https://api.example.com/v1/notes'
+  it('strips trailing slashes from the origin', () => {
+    expect(joinOrigin('https://api.example.com///', '/api/v1/notes')).toBe(
+      'https://api.example.com/api/v1/notes'
     );
   });
 
-  it('keeps an http origin intact for local work', () => {
-    expect(joinOrigin('http://127.0.0.1:8000', '/v1/meta')).toBe(
-      'http://127.0.0.1:8000/v1/meta'
-    );
-  });
-});
-
-describe('what a browser actually requests', () => {
-  /** Mirrors `apiUrl()` in client.ts — the two must agree. */
-  const url = (base: string, path: string) => (base ? joinOrigin(base, path) : `${API_PREFIX}${path}`);
-
-  it('uses a relative path when nothing is configured', () => {
-    // `/api` + the caller's `/v1/...` path. No doubled version segment.
-    expect(url('', '/v1/workspaces/x/notes')).toBe('/api/v1/workspaces/x/notes');
-  });
-
-  it('produces the same target through the proxy route', () => {
-    // The relative request above is rewritten by the proxy route to the upstream
-    // path, which is what an absolute base hits directly. Same endpoint, so
-    // switching between the two configurations cannot change behaviour.
-    const relative = url('', '/v1/workspaces/x/notes');
-    expect(toUpstreamPath(relative)).toBe('/v1/workspaces/x/notes');
-    expect(url('http://127.0.0.1:8000', '/v1/workspaces/x/notes')).toBe(
-      'http://127.0.0.1:8000/v1/workspaces/x/notes'
+  it('does not prefix — callers apply apiPath() first', () => {
+    // Prefixing here as well would give /api/v1/api/v1/... for every request.
+    expect(joinOrigin('https://api.example.com', '/notes')).toBe(
+      'https://api.example.com/notes'
     );
   });
 
-  it('never emits a localhost URL when no base is configured', () => {
-    // The failure this guards: a deployed bundle calling 127.0.0.1, which only
-    // ever succeeds on the developer's own machine.
-    expect(url('', '/v1/meta')).not.toMatch(/localhost|127\.0\.0\.1/);
+  it('composes with apiPath the way client.ts uses it', () => {
+    expect(joinOrigin('https://api.example.com', apiPath('/workspaces/x/notes'))).toBe(
+      'https://api.example.com/api/v1/workspaces/x/notes'
+    );
+  });
+
+  it('keeps a non-API path that the API host also serves', () => {
+    expect(joinOrigin('https://api.example.com', '/health')).toBe(
+      'https://api.example.com/health'
+    );
   });
 });

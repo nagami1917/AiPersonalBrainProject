@@ -163,14 +163,14 @@ class TestRateLimitOnChat:
 
         for _ in range(2):
             response = await client.post(
-                f"/v1/workspaces/{workspace}/chat",
+                f"/api/v1/workspaces/{workspace}/chat",
                 headers=_auth(),
                 json={"message": "what is in my notes?"},
             )
             assert response.status_code == 200, response.text
 
         blocked = await client.post(
-            f"/v1/workspaces/{workspace}/chat",
+            f"/api/v1/workspaces/{workspace}/chat",
             headers=_auth(),
             json={"message": "what is in my notes?"},
         )
@@ -195,12 +195,12 @@ class TestRateLimitOnChat:
         )
         workspace = await _workspace_of()
         first = await client.post(
-            "/v1/ai/chat", headers=_auth(), json={"workspace_id": workspace, "message": "hi"}
+            "/api/v1/ai/chat", headers=_auth(), json={"workspace_id": workspace, "message": "hi"}
         )
         assert first.status_code == 200, first.text
 
         second = await client.post(
-            "/v1/ai/chat", headers=_auth(), json={"workspace_id": workspace, "message": "hi"}
+            "/api/v1/ai/chat", headers=_auth(), json={"workspace_id": workspace, "message": "hi"}
         )
         assert second.status_code == 429
 
@@ -215,12 +215,12 @@ class TestRateLimitOnChat:
         )
         workspace = await _workspace_of()
         await client.post(
-            f"/v1/workspaces/{workspace}/chat",
+            f"/api/v1/workspaces/{workspace}/chat",
             headers=_auth(),
             json={"message": "first"},
         )
         blocked = await client.post(
-            f"/v1/workspaces/{workspace}/chat/stream",
+            f"/api/v1/workspaces/{workspace}/chat/stream",
             headers=_auth(),
             json={"message": "second"},
         )
@@ -237,10 +237,10 @@ class TestRateLimitOnChat:
         )
         workspace = await _workspace_of()
         await client.post(
-            f"/v1/workspaces/{workspace}/chat", headers=_auth(), json={"message": "hi"}
+            f"/api/v1/workspaces/{workspace}/chat", headers=_auth(), json={"message": "hi"}
         )
         summary = await client.post(
-            "/v1/ai/summarize",
+            "/api/v1/ai/summarize",
             headers=_auth(),
             json={"workspace_id": workspace, "text": "some text to summarize"},
         )
@@ -257,7 +257,7 @@ class TestRateLimitOnChat:
         )
         workspace = await _workspace_of()
         response = await client.post(
-            f"/v1/workspaces/{workspace}/chat", headers=_auth(), json={"message": "hi"}
+            f"/api/v1/workspaces/{workspace}/chat", headers=_auth(), json={"message": "hi"}
         )
         assert response.status_code == 429
         assert response.json()["error"]["details"]["retry_after"] <= 31
@@ -276,7 +276,7 @@ class TestDownloadUrls:
         )
 
         response = await client.get(
-            f"/v1/workspaces/{workspace}/documents/{document_id}/download-url", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/documents/{document_id}/download-url", headers=_auth()
         )
         # The signature call goes to the real Supabase URL, which is unreachable
         # in this environment — so a 503 here still proves authorisation passed.
@@ -297,7 +297,7 @@ class TestDownloadUrls:
         )
 
         response = await client.get(
-            f"/v1/workspaces/{workspace}/documents/{document_id}/download-url", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/documents/{document_id}/download-url", headers=_auth()
         )
         assert response.status_code == 404
 
@@ -307,7 +307,7 @@ class TestDownloadUrls:
         document_id = await _make_document(alice_ws, title="Alice only", created=made_documents)
 
         response = await client.get(
-            f"/v1/workspaces/{bob_ws}/documents/{document_id}/download-url", headers=_auth(BOB)
+            f"/api/v1/workspaces/{bob_ws}/documents/{document_id}/download-url", headers=_auth(BOB)
         )
         assert response.status_code == 404
 
@@ -319,7 +319,7 @@ class TestDownloadUrls:
         document_id = await _make_document(workspace, title="Path hidden", created=made_documents)
 
         response = await client.get(
-            f"/v1/workspaces/{workspace}/documents/{document_id}", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/documents/{document_id}", headers=_auth()
         )
         assert response.status_code == 200
         assert response.json()["file_path"] is None
@@ -334,7 +334,7 @@ class TestUploadValidation:
     async def test_a_pdf_declared_as_text_is_refused(self, client):
         workspace = await _workspace_of()
         response = await client.post(
-            f"/v1/workspaces/{workspace}/documents/upload-url",
+            f"/api/v1/workspaces/{workspace}/documents/upload-url",
             headers=_auth(),
             json={"filename": "report.pdf", "mime_type": "text/plain", "file_size": 1024},
         )
@@ -344,7 +344,7 @@ class TestUploadValidation:
     async def test_an_executable_is_refused(self, client):
         workspace = await _workspace_of()
         response = await client.post(
-            f"/v1/workspaces/{workspace}/documents/upload-url",
+            f"/api/v1/workspaces/{workspace}/documents/upload-url",
             headers=_auth(),
             json={
                 "filename": "setup.exe",
@@ -357,7 +357,7 @@ class TestUploadValidation:
     async def test_an_oversized_file_is_refused(self, client):
         workspace = await _workspace_of()
         response = await client.post(
-            f"/v1/workspaces/{workspace}/documents/upload-url",
+            f"/api/v1/workspaces/{workspace}/documents/upload-url",
             headers=_auth(),
             json={"filename": "big.pdf", "mime_type": "application/pdf", "file_size": 999_999_999},
         )
@@ -367,7 +367,7 @@ class TestUploadValidation:
     async def test_a_valid_pdf_gets_a_url(self, client):
         workspace = await _workspace_of()
         response = await client.post(
-            f"/v1/workspaces/{workspace}/documents/upload-url",
+            f"/api/v1/workspaces/{workspace}/documents/upload-url",
             headers=_auth(),
             json={"filename": "report.pdf", "mime_type": "application/pdf", "file_size": 2048},
         )
@@ -387,12 +387,12 @@ class TestAuditTrail:
         document_id = await _make_document(workspace, title="To be deleted", created=made_documents)
 
         response = await client.delete(
-            f"/v1/workspaces/{workspace}/documents/{document_id}", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/documents/{document_id}", headers=_auth()
         )
         assert response.status_code == 204
 
         events = await client.get(
-            f"/v1/workspaces/{workspace}/audit?action=document.delete", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/audit?action=document.delete", headers=_auth()
         )
         assert events.status_code == 200, events.text
         items = events.json()["items"]
@@ -408,7 +408,7 @@ class TestAuditTrail:
         non-admin member — a 403, not a 404, because she knows the workspace exists.
         """
         workspace = await _workspace_of(ALICE)
-        response = await client.get(f"/v1/workspaces/{workspace}/audit", headers=_auth(CAROL))
+        response = await client.get(f"/api/v1/workspaces/{workspace}/audit", headers=_auth(CAROL))
         assert response.status_code == 403
 
     async def test_a_non_member_cannot_read_the_trail(self, client):
@@ -431,7 +431,7 @@ class TestAuditTrail:
         finally:
             await pool.close()
 
-        response = await client.get(f"/v1/workspaces/{workspace}/audit", headers=_auth(BOB))
+        response = await client.get(f"/api/v1/workspaces/{workspace}/audit", headers=_auth(BOB))
         assert response.status_code == 404
 
 
@@ -527,9 +527,11 @@ class TestAuditFunction:
         workspace = await _workspace_of(ALICE)
         # Deleting a document writes a detail-free event; upload writes fields.
         document_id = await _make_document(workspace, title="Detail shape", created=made_documents)
-        await client.delete(f"/v1/workspaces/{workspace}/documents/{document_id}", headers=_auth())
+        await client.delete(
+            f"/api/v1/workspaces/{workspace}/documents/{document_id}", headers=_auth()
+        )
         response = await client.get(
-            f"/v1/workspaces/{workspace}/audit?action=document.delete", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/audit?action=document.delete", headers=_auth()
         )
         assert response.status_code == 200
         items = response.json()["items"]
@@ -557,26 +559,72 @@ class TestAuditFunction:
             await pool.close()
 
     async def test_events_are_append_only_for_users(self):
-        """No update/delete policy exists, so a user cannot rewrite history."""
+        """A user cannot rewrite history, by policy *and* by privilege.
+
+        Two independent mechanisms refuse this, and either one alone is enough:
+
+          * no UPDATE policy exists on `audit_events`, so RLS filters every row
+            out and the statement affects none of them;
+          * no UPDATE privilege is granted to `authenticated` (0016), so the
+            statement is rejected outright before RLS is consulted.
+
+        The second only exists on a database with the explicit grants from 0011
+        and 0016. Supabase's implicit default privileges grant DML on new tables
+        in `public`, so there the first is all that stands. Both are correct
+        outcomes for "append-only", so the test accepts either rather than
+        encoding whichever one the current environment happens to produce —
+        asserting only the 0-rows form is why this passed on Supabase and failed
+        against the plain-Postgres prelude.
+        """
         workspace = await _workspace_of(ALICE)
         pool = await _pool()
         try:
-            async with pool.acquire() as conn, conn.transaction():
-                await conn.execute("select set_config('role', $1, true)", "authenticated")
-                await conn.execute("select set_config('request.jwt.claim.sub', $1, true)", ALICE)
-                event_id = await conn.fetchval(
-                    "select public.record_audit("
-                    "p_workspace_id => $1, p_action => 'test.append_only')",
-                    workspace,
-                )
-                touched = await conn.execute(
-                    "update public.audit_events set action='rewritten' where id=$1", event_id
-                )
-                # No update policy: zero rows affected, and the row is unchanged.
-                assert stroke_is_zero(touched), touched
-                action = await conn.fetchval(
-                    "select action from public.audit_events where id=$1", event_id
-                )
+            async with pool.acquire() as conn:
+                # record_audit takes the actor from the JWT claim GUC, so the
+                # claim has to be set for the write. The role is left as the
+                # connection's own, which is what makes this SECURITY DEFINER
+                # path writable at all.
+                #
+                # The write is its own committed transaction. Sharing the tamper
+                # attempt's transaction would roll the event back on a privilege
+                # error, and the "row is unchanged" assertion would then be
+                # reading a row that never existed rather than a survivor.
+                async with conn.transaction():
+                    await conn.execute(
+                        "select set_config('request.jwt.claim.sub', $1, true)", ALICE
+                    )
+                    event_id = await conn.fetchval(
+                        "select public.record_audit("
+                        "p_workspace_id => $1, p_action => 'test.append_only')",
+                        workspace,
+                    )
+                assert event_id is not None, "the event must exist before we try to rewrite it"
+
+                try:
+                    async with conn.transaction():
+                        await conn.execute("select set_config('role', $1, true)", "authenticated")
+                        await conn.execute(
+                            "select set_config('request.jwt.claim.sub', $1, true)", ALICE
+                        )
+                        touched = await conn.execute(
+                            "update public.audit_events set action='rewritten' where id=$1",
+                            event_id,
+                        )
+                    # No update policy: zero rows affected.
+                    assert stroke_is_zero(touched), touched
+                except asyncpg.InsufficientPrivilegeError:
+                    # No update privilege. Also append-only, and not something to
+                    # paper over: reaching either assertion means the row survived.
+                    pass
+
+                # Whichever mechanism fired, the row is unchanged.
+                pool_after = await _pool()
+                try:
+                    action = await pool_after.fetchval(
+                        "select action from public.audit_events where id=$1", event_id
+                    )
+                finally:
+                    await pool_after.close()
                 assert action == "test.append_only"
         finally:
             await pool.close()
@@ -625,7 +673,7 @@ class TestRetrievalIsolation:
 
         # Bob searches his own workspace for Alice's phrase.
         response = await client.post(
-            f"/v1/workspaces/{bob_ws}/search",
+            f"/api/v1/workspaces/{bob_ws}/search",
             headers=_auth(BOB),
             json={"query": phrase, "limit": 10},
         )
@@ -639,7 +687,7 @@ class TestRetrievalIsolation:
         """Even with Alice's workspace id in the path, membership is checked first."""
         alice_ws = await _workspace_of(ALICE)
         response = await client.post(
-            f"/v1/workspaces/{alice_ws}/search",
+            f"/api/v1/workspaces/{alice_ws}/search",
             headers=_auth(BOB),
             json={"query": "anything at all", "limit": 5},
         )

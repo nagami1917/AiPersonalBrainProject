@@ -54,6 +54,14 @@ def decode_token(token: str, settings: Settings) -> AuthUser:
     if not claims.get("sub"):
         raise Unauthorized("Token has no subject", code="unauthorized")
 
+    # `verify_aud` alone is not enough: python-jose skips the audience check
+    # entirely when the claim is absent, so a token with no `aud` at all was
+    # accepted. Verified against jose directly before this check was added.
+    # Every Supabase access token carries `aud: authenticated`, and a token
+    # without it is not a user session — it must not be treated as one.
+    if not claims.get("aud"):
+        raise Unauthorized("Token has no audience", code="unauthorized")
+
     return AuthUser(claims=claims, token=token)
 
 

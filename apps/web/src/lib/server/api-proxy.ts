@@ -4,7 +4,7 @@
  * ## Why this exists at all
  *
  * The browser calls `/api/v1/...` on its own origin. Something has to forward
- * that to FastAPI, which mounts everything at `/v1`. Until this module existed,
+ * that to FastAPI. Until this module existed,
  * the only thing that did the forwarding was `server.proxy` in `vite.config.ts`
  * — a **dev-server** feature. It had no counterpart in the Vercel build, so a
  * deployed app asked SvelteKit's router for `/api/v1/meta`, got a 404, and the
@@ -23,7 +23,7 @@
  * the browser's authority is the anon key plus RLS; the API's is the JWT).
  */
 
-import { API_PREFIX, API_PATH_PREFIX, API_VERSION_PREFIX, isApiPath } from '$lib/api/paths';
+import { API_NAMESPACE, API_PATH_PREFIX } from '$lib/api/paths';
 
 /**
  * Headers that describe *one* connection and must never be relayed to another,
@@ -106,57 +106,51 @@ export function resolveUpstream(env: ProxyEnv): Upstream | null {
 /**
  * Build the upstream URL for a browser request.
  *
- * `/api/v1/workspaces/x/notes?a=1` → `https://host/v1/workspaces/x/notes?a=1`
+ * `/api/v1/workspaces/x/notes?a=1` → `https://host/api/v1/workspaces/x/notes?a=1`
  *
- * The `/api` segment is dropped and `/v1` kept, which is the same translation
- * `toUpstreamPath` performs for the old dev proxy — reused rather than
- * reimplemented so the two cannot disagree (rule 2).
+ * The path is **not rewritten**. FastAPI serves `/api/v1` and the browser calls
+ * `/api/v1`, so forwarding is the identity — the earlier design mounted FastAPI
+ * at `/v1` and stripped the `/api` segment here, which was a second place for
+ * the two prefixes to disagree.
  *
- * A base that already carries `/api/v1` (the spec's `API_BASE_URL` form) is
- * collapsed first, so pasting that value does not produce `/api/v1/api/v1/...`.
+ * The one transformation left is on the *base*: an operator may set
+ * `API_BASE_URL` to `https://host`, `https://host/api`, or the full
+ * `https://host/api/v1`. All three mean the same origin, so the API suffix is
+ * collapsed and then re-applied by the incoming path. That keeps
+ * `https://host/api/v1` from becoming `https://host/api/v1/api/v1/...`.
  */
 export function buildUpstreamUrl(upstream: Upstream, pathname: string, search = ''): string {
   const base = collapseApiSuffix(upstream.base);
-  const upstreamPath = normalisePath(pathname);
-  return `${base}${upstreamPath}${search}`;
+  return `${base}${normalisePath(pathname)}${search}`;
 }
 
 /**
- * Translate a browser path into its upstream equivalent.
+ * The path to forward.
  *
- * An empty path is the route root (`/api/v1` itself), which becomes the
- * versioned root — not `/`, which would be FastAPI's documentation page rather
- * than an API endpoint.
+ * An empty path or `/` is the route root — `/api/v1` itself — which must stay
+ * `/api/v1` rather than becoming `/`, because `/` is FastAPI's documentation
+ * page and not an API endpoint.
  */
 function normalisePath(pathname: string): string {
   if (!pathname || pathname === '/') {
-    return API_VERSION_PREFIX;
-  }
-  if (isApiPath(pathname)) {
-    return toUpstream(pathname);
+    return API_PATH_PREFIX;
   }
   return pathname.startsWith('/') ? pathname : `/${pathname}`;
 }
 
 /**
- * `https://host/api/v1` and `https://host/api` both mean `https://host` here,
- * because the versioned path is rebuilt from the request.
+ * `https://host/api/v1` and `https://host/api` both reduce to `https://host`,
+ * because the versioned prefix is re-applied from the incoming request path.
  */
 function collapseApiSuffix(base: string): string {
   const trimmed = stripTrailingSlashes(base);
   if (trimmed.toLowerCase().endsWith(API_PATH_PREFIX)) {
     return stripTrailingSlashes(trimmed.slice(0, -API_PATH_PREFIX.length));
   }
-  if (trimmed.toLowerCase().endsWith(API_PREFIX)) {
-    return stripTrailingSlashes(trimmed.slice(0, -API_PREFIX.length));
+  if (trimmed.toLowerCase().endsWith(API_NAMESPACE)) {
+    return stripTrailingSlashes(trimmed.slice(0, -API_NAMESPACE.length));
   }
   return trimmed;
-}
-
-function toUpstream(pathname: string): string {
-  // `/api/v1/x` → `/v1/x`
-  const rest = pathname.slice(API_PREFIX.length);
-  return rest.startsWith(API_VERSION_PREFIX) ? rest : `${API_VERSION_PREFIX}${rest}`;
 }
 
 function stripTrailingSlashes(value: string): string {

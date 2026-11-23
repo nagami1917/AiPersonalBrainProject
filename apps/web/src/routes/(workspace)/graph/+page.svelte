@@ -2,11 +2,11 @@
   /**
    * Knowledge graph page: composition and data only.
    *
-   * A previous version of this page called `/v1/graph/entities/{id}/neighbors`,
+   * A previous version of this page called `/graph/entities/{id}/neighbors`,
    * which did not exist on the server — it rendered "Could not load the graph"
    * for every user and every workspace. The endpoint now exists, and this page
    * calls it through `wsPath` so it is workspace-scoped like everything else
-   * (the flat `/v1/graph` path is for clients that resolve a workspace
+   * (the flat `/graph` path is for clients that resolve a workspace
    * themselves).
    */
   import { onMount } from 'svelte';

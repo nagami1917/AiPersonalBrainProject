@@ -112,7 +112,7 @@ class TestNeighbors:
         ids = await _seed_chain(workspace, 3)
 
         response = await client.get(
-            f"/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors", headers=_auth()
+            f"/api/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors", headers=_auth()
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -127,7 +127,7 @@ class TestNeighbors:
 
         one = (
             await client.get(
-                f"/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
+                f"/api/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
                 headers=_auth(),
                 params={"depth": 1},
             )
@@ -137,7 +137,7 @@ class TestNeighbors:
 
         two = (
             await client.get(
-                f"/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
+                f"/api/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
                 headers=_auth(),
                 params={"depth": 2},
             )
@@ -148,7 +148,7 @@ class TestNeighbors:
         workspace = await _workspace_of()
         ids = await _seed_chain(workspace, 2)
         response = await client.get(
-            f"/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
+            f"/api/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
             headers=_auth(),
             params={"depth": 5},
         )
@@ -159,7 +159,7 @@ class TestNeighbors:
         ids = await _seed_chain(workspace, 3)
         body = (
             await client.get(
-                f"/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
+                f"/api/v1/workspaces/{workspace}/graph/entities/{ids[0]}/neighbors",
                 headers=_auth(),
                 params={"depth": 2},
             )
@@ -173,7 +173,7 @@ class TestNeighbors:
         alice_ws = await _workspace_of(ALICE)
         ids = await _seed_chain(alice_ws, 2)
         response = await client.get(
-            f"/v1/workspaces/{await _workspace_of(BOB)}/graph/entities/{ids[0]}/neighbors",
+            f"/api/v1/workspaces/{await _workspace_of(BOB)}/graph/entities/{ids[0]}/neighbors",
             headers=_auth(BOB),
         )
         assert response.status_code == 404
@@ -181,7 +181,7 @@ class TestNeighbors:
     async def test_an_unknown_entity_is_404(self, client):
         workspace = await _workspace_of()
         response = await client.get(
-            f"/v1/workspaces/{workspace}/graph/entities/"
+            f"/api/v1/workspaces/{workspace}/graph/entities/"
             "00000000-0000-0000-0000-000000000000/neighbors",
             headers=_auth(),
         )
@@ -207,7 +207,7 @@ class TestNeighbors:
 
         body = (
             await client.get(
-                f"/v1/workspaces/{workspace}/graph/entities/{lone}/neighbors", headers=_auth()
+                f"/api/v1/workspaces/{workspace}/graph/entities/{lone}/neighbors", headers=_auth()
             )
         ).json()
         assert [n["id"] for n in body["nodes"]] == [lone]

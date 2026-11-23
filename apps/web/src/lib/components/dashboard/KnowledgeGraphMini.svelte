@@ -2,7 +2,7 @@
   /**
    * A small radial snapshot of the knowledge graph, for the Welcome page.
    *
-   * Same data as the Graph page (`/v1/graph` returns nodes and edges in one
+   * Same data as the Graph page (`/graph` returns nodes and edges in one
    * response), but a fixed, deterministic layout: a preview that jiggles on
    * every visit is noise, and the point here is the *shape* of the knowledge —
    * how many things cluster around what — not exploration. The Graph page owns

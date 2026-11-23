@@ -9,6 +9,8 @@ workspace access rather than trust what arrived.
 
 from __future__ import annotations
 
+import uuid
+
 import asyncpg
 import pytest
 from app.core.config import get_settings
@@ -77,7 +79,7 @@ async def _workspace_of(user_id: str) -> str:
 
 class TestAuthMe:
     async def test_it_returns_identity_workspaces_and_a_default(self, client):
-        response = await client.get("/v1/auth/me", headers=_auth())
+        response = await client.get("/api/v1/auth/me", headers=_auth())
         assert response.status_code == 200
         body = response.json()
 
@@ -88,11 +90,11 @@ class TestAuthMe:
         assert body["default_workspace_id"] == await _workspace_of(ALICE)
 
     async def test_it_requires_a_token(self, client):
-        assert (await client.get("/v1/auth/me")).status_code == 401
+        assert (await client.get("/api/v1/auth/me")).status_code == 401
 
     async def test_the_roster_lists_only_your_own_workspaces(self, client):
-        alice = (await client.get("/v1/auth/me", headers=_auth(ALICE))).json()
-        bob = (await client.get("/v1/auth/me", headers=_auth(BOB))).json()
+        alice = (await client.get("/api/v1/auth/me", headers=_auth(ALICE))).json()
+        bob = (await client.get("/api/v1/auth/me", headers=_auth(BOB))).json()
         alice_ids = {w["id"] for w in alice["workspaces"]}
         bob_ids = {w["id"] for w in bob["workspaces"]}
         # Bob is not a member of Alice's personal workspace.
@@ -101,7 +103,7 @@ class TestAuthMe:
 
 class TestFlatAliases:
     async def test_notes_default_to_the_callers_workspace(self, client):
-        response = await client.get("/v1/notes", headers=_auth())
+        response = await client.get("/api/v1/notes", headers=_auth())
         assert response.status_code == 200
         body = response.json()
         assert "items" in body
@@ -111,24 +113,24 @@ class TestFlatAliases:
         """The API must not confirm that someone else's workspace exists."""
         alice_ws = await _workspace_of(ALICE)
         response = await client.get(
-            "/v1/notes", headers=_auth(BOB), params={"workspace_id": alice_ws}
+            "/api/v1/notes", headers=_auth(BOB), params={"workspace_id": alice_ws}
         )
         assert response.status_code == 404
 
     async def test_documents_alias_matches_the_scoped_route(self, client):
         workspace = await _workspace_of(ALICE)
-        flat = await client.get("/v1/documents", headers=_auth())
-        scoped = await client.get(f"/v1/workspaces/{workspace}/documents", headers=_auth())
+        flat = await client.get("/api/v1/documents", headers=_auth())
+        scoped = await client.get(f"/api/v1/workspaces/{workspace}/documents", headers=_auth())
         assert flat.status_code == scoped.status_code == 200
         assert [d["id"] for d in flat.json()["items"]] == [d["id"] for d in scoped.json()["items"]]
 
     async def test_collections_alias_lists(self, client):
-        response = await client.get("/v1/collections", headers=_auth())
+        response = await client.get("/api/v1/collections", headers=_auth())
         assert response.status_code == 200
         assert isinstance(response.json(), list)
 
     async def test_conversations_alias_lists(self, client):
-        response = await client.get("/v1/conversations", headers=_auth())
+        response = await client.get("/api/v1/conversations", headers=_auth())
         assert response.status_code == 200
         assert isinstance(response.json(), list)
 
@@ -141,13 +143,13 @@ class TestFlatAliases:
             )
         finally:
             await pool.close()
-        response = await client.get(f"/v1/documents/{doc_id}", headers=_auth(BOB))
+        response = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(BOB))
         assert response.status_code == 404
 
 
 class TestSearch:
     async def test_flat_search_returns_results_with_provenance(self, client):
-        response = await client.get("/v1/search", headers=_auth(), params={"q": "secrets"})
+        response = await client.get("/api/v1/search", headers=_auth(), params={"q": "secrets"})
         assert response.status_code == 200
         body = response.json()
         assert body["results"], "the seeded workspace mentions secrets"
@@ -158,7 +160,7 @@ class TestSearch:
 
     async def test_flat_search_honours_kind_filter(self, client):
         response = await client.get(
-            "/v1/search", headers=_auth(), params={"q": "secrets", "kind": "document"}
+            "/api/v1/search", headers=_auth(), params={"q": "secrets", "kind": "document"}
         )
         assert response.status_code == 200
         assert all(r["source_kind"] == "document" for r in response.json()["results"])
@@ -166,18 +168,18 @@ class TestSearch:
     async def test_flat_search_refuses_a_foreign_workspace(self, client):
         alice_ws = await _workspace_of(ALICE)
         response = await client.get(
-            "/v1/search", headers=_auth(BOB), params={"q": "secrets", "workspace_id": alice_ws}
+            "/api/v1/search", headers=_auth(BOB), params={"q": "secrets", "workspace_id": alice_ws}
         )
         assert response.status_code == 404
 
     async def test_an_empty_query_is_rejected_by_validation(self, client):
-        response = await client.get("/v1/search", headers=_auth(), params={"q": ""})
+        response = await client.get("/api/v1/search", headers=_auth(), params={"q": ""})
         assert response.status_code == 422
 
 
 class TestGraph:
     async def test_flat_graph_returns_nodes_and_edges_together(self, client):
-        response = await client.get("/v1/graph", headers=_auth())
+        response = await client.get("/api/v1/graph", headers=_auth())
         assert response.status_code == 200
         body = response.json()
         assert {"nodes", "edges", "workspace_id"} <= set(body)
@@ -185,7 +187,7 @@ class TestGraph:
 
     async def test_every_edge_names_nodes_from_the_same_snapshot(self, client):
         """A graph rendered from two round trips can show an edge to a missing node."""
-        body = (await client.get("/v1/graph", headers=_auth())).json()
+        body = (await client.get("/api/v1/graph", headers=_auth())).json()
         node_ids = {n["id"] for n in body["nodes"]}
         for edge in body["edges"]:
             assert edge["source_id"] in node_ids
@@ -196,7 +198,7 @@ class TestAiChat:
     async def test_chat_takes_the_workspace_in_the_body(self, client):
         workspace = await _workspace_of(ALICE)
         response = await client.post(
-            "/v1/ai/chat",
+            "/api/v1/ai/chat",
             headers=_auth(),
             json={"workspace_id": workspace, "question": "Where is the service role key stored?"},
         )
@@ -217,7 +219,7 @@ class TestAiChat:
         workspace = await _workspace_of(ALICE)
         body = (
             await client.post(
-                "/v1/ai/chat",
+                "/api/v1/ai/chat",
                 headers=_auth(),
                 json={"workspace_id": workspace, "question": "FOR UPDATE SKIP LOCKED"},
             )
@@ -240,32 +242,79 @@ class TestAiChat:
         workspace = await _workspace_of(ALICE)
         asked = (
             await client.post(
-                "/v1/ai/chat",
+                "/api/v1/ai/chat",
                 headers=_auth(),
                 json={"workspace_id": workspace, "question": "FOR UPDATE SKIP LOCKED"},
             )
         ).json()
 
+        # Snapshot the citations as the API returns them, then rename the
+        # documents behind them. Keying on chunk id rather than on a document
+        # covers note citations too: a note chunk has `document_id = NULL`, so a
+        # chunk→document join silently drops it and the per-citation lookup below
+        # would raise KeyError.
+        before = [
+            (s["chunk_id"], s["filename"])
+            for m in (
+                await client.get(
+                    f"/api/v1/conversations/{asked['conversation_id']}", headers=_auth()
+                )
+            ).json()["messages"]
+            for s in (m.get("citations") or [])
+        ]
+        expected = dict(before)
+        assert expected, "the answer must cite at least one source"
+
         pool = await asyncpg.create_pool(get_settings().database_url, min_size=1, max_size=1)
         try:
-            original = await pool.fetchval(
-                "select d.filename from public.documents d where d.workspace_id=$1 limit 1",
-                workspace,
+            # Only the documents actually cited. An unscoped
+            # `update ... where workspace_id=$1` renamed every document in the
+            # workspace and then left it renamed, so the seed's filename leaked
+            # into later runs as `renamed.pdf`.
+            cited_documents = await pool.fetch(
+                "select distinct d.id, d.filename "
+                "from public.document_chunks c join public.documents d on d.id = c.document_id "
+                "where c.id = any($1::uuid[])",
+                [uuid.UUID(cid) for cid in expected],
             )
-            # A rename and delete after the fact must not disturb history.
-            await pool.execute(
-                "update public.documents set filename='renamed.pdf' where workspace_id=$1",
-                workspace,
-            )
+            originals = {row["id"]: row["filename"] for row in cited_documents}
+            if originals:
+                await pool.execute(
+                    "update public.documents set filename='renamed.pdf' "
+                    "where id = any($1::uuid[])",
+                    list(originals),
+                )
         finally:
             await pool.close()
 
-        replay = await client.get(f"/v1/conversations/{asked['conversation_id']}", headers=_auth())
-        assert replay.status_code == 200
-        messages = replay.json()["messages"]
-        cited = [s for m in messages for s in (m.get("citations") or [])]
-        assert cited, messages
-        assert all(s["filename"] == original for s in cited), cited
+        try:
+            replay = await client.get(
+                f"/api/v1/conversations/{asked['conversation_id']}", headers=_auth()
+            )
+            assert replay.status_code == 200
+            messages = replay.json()["messages"]
+            cited = [s for m in messages for s in (m.get("citations") or [])]
+            assert cited, messages
+            # Persisted citations keep the name the source had when it was cited,
+            # not the one it has now.
+            assert all(s["filename"] != "renamed.pdf" for s in cited), cited
+            assert {s["chunk_id"]: s["filename"] for s in cited} == expected, cited
+        finally:
+            # Restore the names, so the seeded workspace is not left reading
+            # `renamed.pdf` for every later test and every later run.
+            if originals:
+                pool = await asyncpg.create_pool(
+                    get_settings().database_url, min_size=1, max_size=1
+                )
+                try:
+                    for document_id, filename in originals.items():
+                        await pool.execute(
+                            "update public.documents set filename=$2 where id=$1",
+                            document_id,
+                            filename,
+                        )
+                finally:
+                    await pool.close()
 
     async def test_feedback_round_trips_through_the_transcript(self, client):
         """The transcript read used a column that never existed, so this was a
@@ -273,27 +322,27 @@ class TestAiChat:
         workspace = await _workspace_of(ALICE)
         asked = (
             await client.post(
-                "/v1/ai/chat",
+                "/api/v1/ai/chat",
                 headers=_auth(),
                 json={"workspace_id": workspace, "question": "FOR UPDATE SKIP LOCKED"},
             )
         ).json()
 
         before = (
-            await client.get(f"/v1/conversations/{asked['conversation_id']}", headers=_auth())
+            await client.get(f"/api/v1/conversations/{asked['conversation_id']}", headers=_auth())
         ).json()
         assert all(m["feedback"] is None for m in before["messages"])
 
         assistant = [m for m in before["messages"] if m["role"] == "assistant"][0]
         rated = await client.post(
-            f"/v1/workspaces/{workspace}/messages/{assistant['id']}/feedback",
+            f"/api/v1/workspaces/{workspace}/messages/{assistant['id']}/feedback",
             headers=_auth(),
             json={"helpful": False, "reason": "cited the wrong passage"},
         )
         assert rated.status_code < 300, rated.text
 
         after = (
-            await client.get(f"/v1/conversations/{asked['conversation_id']}", headers=_auth())
+            await client.get(f"/api/v1/conversations/{asked['conversation_id']}", headers=_auth())
         ).json()
         stored = [m for m in after["messages"] if m["id"] == assistant["id"]][0]
         assert stored["feedback"] == {"helpful": False, "reason": "cited the wrong passage"}
@@ -301,7 +350,7 @@ class TestAiChat:
     async def test_feedback_on_a_foreign_message_is_404(self, client):
         body = (
             await client.post(
-                "/v1/ai/chat",
+                "/api/v1/ai/chat",
                 headers=_auth(ALICE),
                 json={
                     "workspace_id": await _workspace_of(ALICE),
@@ -310,12 +359,14 @@ class TestAiChat:
             )
         ).json()
         transcript = (
-            await client.get(f"/v1/conversations/{body['conversation_id']}", headers=_auth(ALICE))
+            await client.get(
+                f"/api/v1/conversations/{body['conversation_id']}", headers=_auth(ALICE)
+            )
         ).json()
         message_id = transcript["messages"][-1]["id"]
 
         response = await client.post(
-            f"/v1/workspaces/{await _workspace_of(BOB)}/messages/{message_id}/feedback",
+            f"/api/v1/workspaces/{await _workspace_of(BOB)}/messages/{message_id}/feedback",
             headers=_auth(BOB),
             json={"helpful": True},
         )
@@ -325,7 +376,7 @@ class TestAiChat:
         """The body is exactly as untrusted as the URL."""
         alice_ws = await _workspace_of(ALICE)
         response = await client.post(
-            "/v1/ai/chat",
+            "/api/v1/ai/chat",
             headers=_auth(BOB),
             json={"workspace_id": alice_ws, "question": "anything"},
         )
@@ -335,7 +386,7 @@ class TestAiChat:
         workspace = await _workspace_of(ALICE)
         body = (
             await client.post(
-                "/v1/ai/chat",
+                "/api/v1/ai/chat",
                 headers=_auth(),
                 json={
                     "workspace_id": workspace,
@@ -352,7 +403,7 @@ class TestAiChat:
         workspace = await _workspace_of(ALICE)
         body = (
             await client.post(
-                "/v1/ai/chat",
+                "/api/v1/ai/chat",
                 headers=_auth(),
                 json={
                     "workspace_id": workspace,
@@ -368,7 +419,7 @@ class TestAiChat:
         workspace = await _workspace_of(ALICE)
         async with client.stream(
             "POST",
-            "/v1/ai/stream",
+            "/api/v1/ai/stream",
             headers=_auth(),
             json={"workspace_id": workspace, "question": "Where is the service role key stored?"},
         ) as response:
@@ -386,7 +437,7 @@ class TestAiSummarize:
     async def test_it_summarizes_pasted_text(self, client, llm):
         workspace = await _workspace_of(ALICE)
         response = await client.post(
-            "/v1/ai/summarize",
+            "/api/v1/ai/summarize",
             headers=_auth(),
             json={"workspace_id": workspace, "text": "The worker claims jobs with a row lock."},
         )
@@ -416,7 +467,7 @@ class TestAiSummarize:
             await pool.close()
 
         response = await client.post(
-            "/v1/ai/summarize",
+            "/api/v1/ai/summarize",
             headers=_auth(),
             json={"workspace_id": workspace, "source_id": str(doc_id)},
         )
@@ -435,7 +486,7 @@ class TestAiSummarize:
             await pool.close()
 
         response = await client.post(
-            "/v1/ai/summarize",
+            "/api/v1/ai/summarize",
             headers=_auth(BOB),
             json={"workspace_id": bob_ws, "source_id": str(alice_doc)},
         )
@@ -444,7 +495,7 @@ class TestAiSummarize:
     async def test_both_inputs_at_once_is_rejected(self, client):
         workspace = await _workspace_of(ALICE)
         response = await client.post(
-            "/v1/ai/summarize",
+            "/api/v1/ai/summarize",
             headers=_auth(),
             json={
                 "workspace_id": workspace,
@@ -458,6 +509,6 @@ class TestAiSummarize:
     async def test_neither_input_is_rejected(self, client):
         workspace = await _workspace_of(ALICE)
         response = await client.post(
-            "/v1/ai/summarize", headers=_auth(), json={"workspace_id": workspace}
+            "/api/v1/ai/summarize", headers=_auth(), json={"workspace_id": workspace}
         )
         assert response.status_code == 400

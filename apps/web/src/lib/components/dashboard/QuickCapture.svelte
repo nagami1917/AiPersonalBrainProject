@@ -33,7 +33,7 @@
   $effect(() => {
     // The size/type limits are the API's, so they are fetched rather than
     // duplicated here where they would go stale.
-    void apiFetch<Meta>('/v1/meta')
+    void apiFetch<Meta>('/meta')
       .then((value) => (meta = value))
       .catch(() => (meta = null));
   });

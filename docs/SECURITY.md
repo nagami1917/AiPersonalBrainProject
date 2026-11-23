@@ -46,11 +46,21 @@ permission.
 **1. JWT-derived identity.** `current_user` decodes the bearer token and takes `user_id` from the
 `sub` claim. Request bodies cannot influence it.
 
+The token must carry four things, and all four are checked: a valid `HS256` signature against
+`SUPABASE_JWT_SECRET`, an unexpired `exp`, a non-empty `sub`, and an `aud` of `authenticated`.
+Anything else is a `401` with a generic message — the response never says which check failed.
+
+> **The `aud` check is manual on purpose.** `python-jose` with
+> `audience=…, options={"verify_aud": True}` *skips* the audience comparison when the claim is
+> absent, so a token minted without any `aud` claim was accepted. The claim is therefore asserted
+> explicitly (`claims.get("aud")`). `tests/unit/test_jwt_verification.py` covers the missing-`aud`
+> case; do not "simplify" it back to the library option.
+
 **2. Workspace resolution at the route boundary.** Every tenant route is
-`/v1/workspaces/{workspace_id}/…`. `resolve_workspace()` joins `workspace_members` for the caller;
+`/api/v1/workspaces/{workspace_id}/…`. `resolve_workspace()` joins `workspace_members` for the caller;
 a non-member gets `404`, never `403`, because a `403` would confirm the workspace exists.
 
-**3. RLS on all 18 tables.** Policies are membership-based (`is_workspace_member`,
+**3. RLS on all 20 tables.** Policies are membership-based (`is_workspace_member`,
 `can_write_workspace`, `can_manage_workspace`), not owner-based. `user_db` opens a transaction and
 sets `role = authenticated` plus the JWT claim **on the connection**, so Postgres applies policy to
 everything the request does — including `hybrid_search`, which runs `SECURITY INVOKER` and takes
@@ -67,7 +77,7 @@ select count(*) from public.notes where workspace_id = '<alice ws>';   → reada
 insert into public.notes (workspace_id, ...) values ('<alice ws>');    → rejected: RLS policy
 update public.notes set title='pwned' where workspace_id='<alice ws>'; → UPDATE 0
 insert into public.workspace_members ...;                              → rejected: RLS policy
-GET /v1/workspaces/<bob ws>/notes                                      → 404
+GET /api/v1/workspaces/<bob ws>/notes                                      → 404
 POST public.hybrid_search(p_workspace_id => '<alice ws>')              → 0 rows
 ```
 
@@ -179,7 +189,7 @@ A per-user-only limit cannot protect the bill; a per-workspace-only limit lets o
 
 `429` carries `{"details": {"scope": "user" | "workspace", "retry_after": n}}`, so a client knows whether to back off or to tell the user. Both budgets are checked *before* either is incremented, so a workspace rejection does not also spend the human's personal allowance.
 
-**Honest limits.** Counters are per process. With N API replicas the effective ceiling is N×, which `/v1/meta` states as `rate_limits.distributed: false` rather than implying precision that is not there. Postgres- or Redis-backed counting is the upgrade path; the interface is already async, so no route changes.
+**Honest limits.** Counters are per process. With N API replicas the effective ceiling is N×, which `/api/v1/meta` states as `rate_limits.distributed: false` rather than implying precision that is not there. Postgres- or Redis-backed counting is the upgrade path; the interface is already async, so no route changes.
 
 Unbounded LLM spend is the cheapest denial-of-wallet attack against a RAG product, which is why limits and `usage_events` ship in the first milestone rather than last.
 
@@ -188,7 +198,7 @@ Unbounded LLM spend is the cheapest denial-of-wallet attack against a RAG produc
 ## 8. Audit trail
 
 Migration `0013_audit_events.sql`, written by `app/core/audit.py`, readable at
-`GET /v1/workspaces/{id}/audit`.
+`GET /api/v1/workspaces/{id}/audit`.
 
 **Recorded:** document upload / delete / reprocess / download, workspace delete, member add /
 remove / leave / role change.

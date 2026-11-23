@@ -18,6 +18,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "test", "preview", "production"]
 
+# ---------------------------------------------------------------------------
+# The versioned API prefix — the single definition of where routes live.
+# ---------------------------------------------------------------------------
+# The application was originally mounted at `/v1` and the browser called
+# `/api/v1`, with a proxy translating between them. Two spellings of the same
+# thing is a bug waiting to be filed: every log line, doc example and test URL
+# had to remember which side of the proxy it was on.
+#
+# The prefix is now `/api/v1` end to end. It is assembled from two constants
+# because they mean different things — `/api` is the routing namespace,
+# `/v1` is the version — and a future `/v2` should change only the second.
+#
+# `core/tenancy` and the frontend's `paths.ts` both derive their prefixes from
+# this, so changing the version here changes it everywhere, including the
+# OpenAPI document.
+API_NAMESPACE = "/api"
+API_VERSION = "v1"
+API_PREFIX = f"{API_NAMESPACE}/{API_VERSION}"
+
 # Known model → dimension. Pinned here because these two values are a pair: a
 # vector column built for one is unusable with the other.
 _EMBEDDING_DIMS = {"text-embedding-3-small": 1536, "text-embedding-3-large": 3072}
