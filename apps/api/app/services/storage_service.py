@@ -14,6 +14,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.errors import ProviderUnavailable
+from app.core.supabase_headers import storage_admin_headers
 
 
 def _sign(settings: Settings, path: str, expires_in: int) -> dict[str, Any]:
@@ -28,10 +29,7 @@ def _sign(settings: Settings, path: str, expires_in: int) -> dict[str, Any]:
     try:
         response = httpx.post(
             f"{settings.supabase_url}/storage/v1/object/sign/{settings.storage_bucket}/{path}",
-            headers={
-                "Authorization": f"Bearer {settings.supabase_service_role_key}",
-                "apikey": settings.supabase_service_role_key,
-            },
+            headers=storage_admin_headers(settings),
             json={"expiresIn": expires_in},
             timeout=20,
         )

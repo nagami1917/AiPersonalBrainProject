@@ -28,6 +28,7 @@ from app.ai.ingestion import (
 )
 from app.ai.providers import Embedder
 from app.core.config import Settings
+from app.core.supabase_headers import storage_admin_headers
 from app.core.upload_validation import UploadValidationError, validate_content
 
 log = logging.getLogger(__name__)
@@ -373,10 +374,7 @@ async def _download(file_path: str, settings: Settings) -> bytes:
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.get(
             url,
-            headers={
-                "Authorization": f"Bearer {settings.supabase_service_role_key}",
-                "apikey": settings.supabase_service_role_key,
-            },
+            headers=storage_admin_headers(settings),
         )
         if response.status_code == 404:
             raise ExtractionError(

@@ -75,9 +75,15 @@ class Settings(BaseSettings):
 
     # --- supabase -----------------------------------------------------------
     supabase_url: str
-    supabase_anon_key: str
-    supabase_service_role_key: str
-    supabase_jwt_secret: str
+    # New API keys are opaque and independent of JWT signing keys. Legacy names
+    # remain accepted for local Supabase and existing deployments.
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
+    supabase_publishable_key: str = ""
+    supabase_secret_key: str = ""
+    # Explicit mode prevents a token header from choosing a weaker algorithm.
+    supabase_jwt_algorithm: Literal["HS256", "ES256"] = "HS256"
+    supabase_jwt_secret: str = ""
     database_url: str = ""
     # The spec's name for the same connection. Resolved into `database_url` by
     # the validator below, so no other module needs to know both exist.
@@ -188,6 +194,24 @@ class Settings(BaseSettings):
         DEPLOYMENT.md §5, so the accepted set is discoverable rather than
         folklore.
         """
+        # New API keys take precedence when both generations are configured.
+        if self.supabase_publishable_key:
+            self.supabase_anon_key = self.supabase_publishable_key
+        if self.supabase_secret_key:
+            self.supabase_service_role_key = self.supabase_secret_key
+        if not self.supabase_anon_key:
+            raise ValueError("SUPABASE_PUBLISHABLE_KEY or SUPABASE_ANON_KEY is required")
+        if not self.supabase_service_role_key:
+            raise ValueError("SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY is required")
+        if self.supabase_jwt_algorithm == "HS256" and not self.supabase_jwt_secret:
+            raise ValueError("SUPABASE_JWT_SECRET is required for HS256")
+        if self.supabase_jwt_algorithm == "ES256" and self.is_production:
+            from urllib.parse import urlsplit
+
+            url = urlsplit(self.supabase_url)
+            if url.scheme != "https" or not url.hostname or url.username or url.password:
+                raise ValueError("ES256 production verification requires an HTTPS SUPABASE_URL")
+
         # SUPABASE_DB_URL → DATABASE_URL
         if not self.database_url and self.supabase_db_url:
             self.database_url = self.supabase_db_url
