@@ -20,12 +20,11 @@ from __future__ import annotations
 from typing import Any
 
 from jose import JWTError, jwt
+from jose.exceptions import JOSEError
 
 from app.core.config import Settings
 from app.core.errors import Unauthorized
-
-# Supabase signs access tokens with HS256 using the project JWT secret.
-_ALGORITHMS = ("HS256",)
+from app.core.jwks import signing_key
 
 
 class AuthUser:
@@ -41,17 +40,32 @@ class AuthUser:
 
 def decode_token(token: str, settings: Settings) -> AuthUser:
     try:
-        claims = jwt.decode(
-            token,
-            settings.supabase_jwt_secret,
-            algorithms=list(_ALGORITHMS),
-            audience="authenticated",
-            options={"verify_aud": True},
-        )
-    except JWTError as exc:  # expired, wrong signature, malformed
+        if settings.supabase_jwt_algorithm == "ES256":
+            header = jwt.get_unverified_header(token)
+            kid = header.get("kid")
+            if header.get("alg") != "ES256" or not isinstance(kid, str) or not kid:
+                raise JWTError("unexpected signing algorithm or missing key id")
+            key = signing_key(settings.supabase_url, kid)
+            claims = jwt.decode(
+                token,
+                key,
+                algorithms=["ES256"],
+                audience="authenticated",
+                issuer=f"{settings.supabase_url.rstrip('/')}/auth/v1",
+                options={"require_exp": True, "require_iss": True, "require_aud": True},
+            )
+        else:
+            claims = jwt.decode(
+                token,
+                settings.supabase_jwt_secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"verify_aud": True},
+            )
+    except (JOSEError, ValueError, TypeError) as exc:
         raise Unauthorized("Invalid or expired token", code="unauthorized") from exc
 
-    if not claims.get("sub"):
+    if not isinstance(claims.get("sub"), str) or not claims["sub"]:
         raise Unauthorized("Token has no subject", code="unauthorized")
 
     # `verify_aud` alone is not enough: python-jose skips the audience check
@@ -61,6 +75,9 @@ def decode_token(token: str, settings: Settings) -> AuthUser:
     # without it is not a user session — it must not be treated as one.
     if not claims.get("aud"):
         raise Unauthorized("Token has no audience", code="unauthorized")
+
+    if settings.supabase_jwt_algorithm == "ES256" and claims.get("role") != "authenticated":
+        raise Unauthorized("Invalid or expired token", code="unauthorized")
 
     return AuthUser(claims=claims, token=token)
 

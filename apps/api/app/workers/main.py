@@ -16,6 +16,7 @@ from app.ai.providers import build_embedder, build_llm
 from app.core.config import get_settings
 from app.core.db import close_pool, get_pool
 from app.core.logging import configure_logging
+from app.core.supabase_headers import storage_admin_headers
 from app.repositories import knowledge as repo
 from app.workers import enrich, ingest
 from app.workers.queue import (
@@ -146,10 +147,7 @@ async def _delete_storage_object(settings, file_path: str) -> None:  # type: ign
         async with httpx.AsyncClient(timeout=60) as client:
             await client.delete(
                 url,
-                headers={
-                    "Authorization": f"Bearer {settings.supabase_service_role_key}",
-                    "apikey": settings.supabase_service_role_key,
-                },
+                headers=storage_admin_headers(settings),
             )
     except Exception:
         log.exception("purge: could not delete storage object %s", file_path)

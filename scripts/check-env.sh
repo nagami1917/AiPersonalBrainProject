@@ -47,22 +47,30 @@ section() { printf '\n%s\n' "$1"; }
 section "Backend (apps/api)"
 
 if nonempty SUPABASE_URL; then pass "SUPABASE_URL is set"; else fail "SUPABASE_URL is not set"; fi
-if nonempty SUPABASE_ANON_KEY; then pass "SUPABASE_ANON_KEY is set"; else fail "SUPABASE_ANON_KEY is not set"; fi
-if nonempty SUPABASE_SERVICE_ROLE_KEY; then
-  pass "SUPABASE_SERVICE_ROLE_KEY is set (server-side only)"
+if nonempty SUPABASE_PUBLISHABLE_KEY SUPABASE_ANON_KEY; then
+  pass "Supabase publishable/anon key is set"
 else
-  fail "SUPABASE_SERVICE_ROLE_KEY is not set"
+  fail "SUPABASE_PUBLISHABLE_KEY or SUPABASE_ANON_KEY is not set"
 fi
-if nonempty SUPABASE_JWT_SECRET; then
-  len=${#SUPABASE_JWT_SECRET}
-  if (( len >= 32 )); then
-    pass "SUPABASE_JWT_SECRET is set (${len} chars)"
-  else
-    fail "SUPABASE_JWT_SECRET is too short (${len} chars, need 32+)"
-  fi
+if nonempty SUPABASE_SECRET_KEY SUPABASE_SERVICE_ROLE_KEY; then
+  pass "Supabase secret/service-role key is set (server-side only)"
 else
-  fail "SUPABASE_JWT_SECRET is not set"
+  fail "SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY is not set"
 fi
+case "${SUPABASE_JWT_ALGORITHM:-HS256}" in
+  ES256)
+    pass "ES256 verification uses Supabase's public JWKS"
+    ;;
+  HS256)
+    jwt_secret="${SUPABASE_JWT_SECRET:-}"
+    if [[ ${#jwt_secret} -ge 32 ]]; then
+      pass "SUPABASE_JWT_SECRET is set (HS256)"
+    else
+      fail "SUPABASE_JWT_SECRET must be at least 32 characters for HS256"
+    fi
+    ;;
+  *) fail "SUPABASE_JWT_ALGORITHM must be HS256 or ES256" ;;
+esac
 
 # Either spelling is accepted by app/core/config.py.
 if nonempty DATABASE_URL SUPABASE_DB_URL; then
@@ -150,8 +158,14 @@ else
   fail "PUBLIC_SUPABASE_ANON_KEY is not set"
 fi
 
+# A secret key with PUBLIC_ prefix is exposed to the browser regardless of
+# which field the app happens to read today.
+if nonempty PUBLIC_SUPABASE_SECRET_KEY PUBLIC_SUPABASE_SERVICE_ROLE_KEY; then
+  fail "a Supabase secret key is marked PUBLIC — remove it immediately"
+fi
+
 # The mistake the whole architecture is built to prevent.
-if nonempty SUPABASE_SERVICE_ROLE_KEY && [[ "${CHECK_FRONTEND:-0}" == "1" ]]; then
+if nonempty SUPABASE_SERVICE_ROLE_KEY SUPABASE_SECRET_KEY && [[ "${CHECK_FRONTEND:-0}" == "1" ]]; then
   fail "a service-role key is present in the frontend environment — remove it immediately"
 fi
 

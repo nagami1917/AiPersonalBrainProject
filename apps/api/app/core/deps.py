@@ -13,6 +13,7 @@ from typing import Annotated
 
 import asyncpg
 from fastapi import Depends, Path, Request
+from starlette.concurrency import run_in_threadpool
 
 from app.ai.providers import LLM, Embedder
 from app.core import tenancy
@@ -31,7 +32,7 @@ def _bearer(request: Request) -> str:
 
 
 async def current_user(request: Request, settings: Settings = Depends(get_settings)) -> AuthUser:
-    user = decode_token(_bearer(request), settings)
+    user = await run_in_threadpool(decode_token, _bearer(request), settings)
     request.state.user_id = user.id
     return user
 
